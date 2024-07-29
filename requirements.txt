@@ -1,0 +1,8 @@
+--find-links https://download.pytorch.org/whl/cu118/torch_stable.html
+torch==2.0.0
+torchvision==0.15.1
+torchaudio==2.0.1
+pytorch-lightning==2.0.0
+torchinfo==1.8.0
+tensorboard==2.12
+numpy==1.26

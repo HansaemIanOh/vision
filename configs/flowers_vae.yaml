@@ -1,0 +1,28 @@
+model_config:
+  name: 'flowers_vae'
+  input_channels: 3
+  learning_rate: 0.0001
+  manual_seed: 42
+  h_dims: [3, 16, 32, 64, 128, 256] # 224, 112, 56, 28, 14, 7
+  patch_size: 224
+  latent_dim: 256
+  kld_weight: 0.0002
+data_config:
+  data_dir: "data/flowers/train"
+  batch_size: 16
+  patch_size: 224
+  num_workers: 4
+  use_manual_split: True
+
+
+trainer_config:
+  accelerator: 'gpu'
+  devices: 4  # 2 or [0, 1]
+  max_epochs: 500
+
+log_config:
+  name: "flower_vae"
+  save_dir: "logs/"
+  check_dir: "logs/check"
+  model_summary: True
+  
