@@ -132,8 +132,8 @@ class FLOWERVAEModel(pl.LightningModule):
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.config['learning_rate'])
     
-    def on_validation_end(self) -> None:
-        if self.current_epoch % self.save_period == 0:
+    def on_validation_epoch_end(self):
+        if self.current_epoch % self.sampling_period == 0:
             self.sample_images()
     
     def sample(self, num_samples):

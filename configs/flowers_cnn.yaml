@@ -26,5 +26,6 @@ log_config:
   name: "flowers_cnn"
   save_dir: "logs/"
   check_dir: "logs/check"
+  checkpoint_path: None
   model_summary: False
   

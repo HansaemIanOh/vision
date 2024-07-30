@@ -3,14 +3,15 @@ model_config:
   input_channels: 3
   learning_rate: 0.0001
   manual_seed: 42
-  h_dims: [3, 64, 64, 128, 128, 256] # 224, 112, 56, 28, 14, 7
+  h_dims: [3, 128, 128, 256, 256] # 224, 112, 56, 28, 14
   patch_size: 224
-  attn_res: [7, 14]
+  attn_res: [14]
   with_conv: True
   dropout: 0.1
   t_max: 1000
   latent_dim: [3, 224, 224]
-  sampling_period: 10
+  sampling_period: 20
+  warmup_step: 100
 
 
 data_config:
@@ -23,12 +24,13 @@ data_config:
 
 trainer_config:
   accelerator: 'gpu'
-  devices: [2]  # 2 or [0, 1]
+  devices: 4  # 2 or [0, 1]
   max_epochs: 2000
 
 log_config:
   name: "flower_ddpm"
   save_dir: "logs/"
   check_dir: "logs/check"
+  checkpoint_path: None
   model_summary: False
   

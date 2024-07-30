@@ -5,4 +5,8 @@ torchaudio==2.0.1
 pytorch-lightning==2.0.0
 torchinfo==1.8.0
 tensorboard==2.12
-numpy==1.26
+numpy==1.26.3
+matplotlib==3.7.1
+seaborn==0.12.2
+scikit-learn==1.2.2
+pandas==2.0.1

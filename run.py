@@ -33,6 +33,9 @@ logger = TensorBoardLogger(save_dir=config['log_config']['save_dir'], name=confi
 seed_everything(config['model_config']['manual_seed'], True)
 
 model = get_model(config['model_config']['name'], config['model_config'])
+checkpoint = config['log_config']['checkpoint_path']
+if checkpoint != 'None':
+    model.load_from_checkpoint(checkpoint)
 # model = get_model(config['model_config'])
 @rank_zero_only
 def model_summary(model, input_size=(1, 3, 224, 224)):
@@ -61,6 +64,6 @@ trainer.fit(model, datamodule=data_module)
 @rank_zero_only
 def test_model():
     test_trainer = pl.Trainer(devices=1, num_nodes=1)
-    test_result = test_trainer.test(model, data_module.test_dataloader(), verbose=True)
+    test_trainer.test(model, data_module.test_dataloader(), verbose=True)
 
 test_model()

@@ -15,72 +15,74 @@ def match_dims(x, y): return list(x.shape) + [1] * (len(y.shape)-len(x.shape))
 class DownBlock(nn.Module):
     def __init__(self, in_features, out_features, act, with_conv=True):
         super().__init__()
-        self.conv2d_type2 = nn.Conv2d(in_features, out_features, kernel_size=(3, 3), stride=2, padding=1) # type1 : 311, type2: 3,2,1
-        self.pool = nn.AvgPool2d((2, 2))
-        self.act = act
-        self.with_conv = with_conv
+        self.layers = nn.ModuleList()
+        if with_conv:
+            self.layers.append(nn.Conv2d(in_features, out_features, kernel_size=(3, 3), stride=2, padding=1))
+        else:
+            self.layers.append(nn.AvgPool2d((2, 2)))
 
     def forward(self, x : Tensor, temb : Tensor) -> Tensor:
-        
-        if self.with_conv:
-            x = self.conv2d_type2(x)
-        else:
-            x = self.pool(x)
-        return x
+        h = x
+        for module in self.layers:
+            h = module(h)
+        return h
 
 class UpBlock(nn.Module):
     def __init__(self, in_features, out_features, act, with_conv=True):
         super().__init__()
-        self.conv2d_type1 = nn.Conv2d(in_features, out_features, kernel_size=(3, 3), stride=1, padding=1)
-        self.interpolate = nn.Upsample(scale_factor=2, mode='nearest')
-        self.act = act
-        self.with_conv = with_conv
+        self.layers = nn.ModuleList()
+        self.layers.append(nn.Upsample(scale_factor=2, mode='nearest'))
+        if with_conv:
+            self.layers.append(nn.Conv2d(in_features, out_features, kernel_size=(3, 3), stride=1, padding=1))
 
     def forward(self, x : Tensor, temb : Tensor) -> Tensor:
-        
-        x = self.interpolate(x)
-        if self.with_conv:
-            x = self.conv2d_type1(x)
-        return x
+        h = x
+        for module in self.layers:
+            h = module(h)
+        return h
 
 class ResNetBlock(nn.Module):
     def __init__(self, in_features, out_features, act, time_features, conv_shortcut=False, dropout=0.):
         super().__init__()
         self.act = act
-
-        self.conv2d_1 = nn.Conv2d(in_features, out_features, kernel_size=(3, 3), stride=1, padding=1)
-        self.conv2d_2 = nn.Conv2d(out_features, out_features, kernel_size=(3, 3), stride=1, padding=1)
-        self.conv2d_3 = nn.Conv2d(in_features, out_features, kernel_size=(3, 3), stride=1, padding=1)
-
-        self.norm1 = nn.BatchNorm2d(in_features)
-        self.norm2 = nn.BatchNorm2d(out_features)
-
-        self.linear_1 = Custumnn.Linear(time_features, out_features)
-        self.linear_2 = Custumnn.Linear(in_features, out_features)
-        self.dropout = dropout
-        self.conv_shortcut = conv_shortcut
-        self.dropout_nn = nn.Dropout(dropout)
-        self.in_features = in_features
-        self.out_features = out_features
-        self.time_features = time_features
+        self.linear_temb = Custumnn.Linear(time_features, out_features)
+        self.block1 = nn.ModuleList()
+        self.block1.append(nn.Sequential(
+            nn.BatchNorm2d(in_features),
+            self.act,
+            nn.Conv2d(in_features, out_features, kernel_size=(3, 3), stride=1, padding=1)
+        ))
+        self.block2 = nn.ModuleList()
+        self.block2.append(nn.Sequential(
+            nn.BatchNorm2d(out_features),
+            self.act,
+            nn.Dropout(dropout),
+            nn.Conv2d(out_features, out_features, kernel_size=(3, 3), stride=1, padding=1)
+        ))
+        
+        self.layers = None
+        if in_features!= out_features:
+            self.layers = nn.ModuleList()
+            if conv_shortcut:
+                self.layers.append(nn.Conv2d(out_features, out_features, kernel_size=(3, 3), stride=1, padding=1)) # x to x
+            else:
+                self.layers.append(Custumnn.Linear(in_features, out_features)) # x to x
     def forward(self, x : Tensor, temb=None) -> Tensor:
         if temb==None:
             temb = torch.randint(0, self.t_max, (x.shape[0], 64), device=x.device, dtype=x.dtype)
         h = x
-        h = self.act(self.norm1(h))
-        h = self.conv2d_1(h)
-        temb = self.linear_1(self.act(temb))
+        for module in self.block1:
+            h = module(h)
+        
+        temb = self.linear_temb(self.act(temb))
         h+= temb.view(match_dims(temb, h))
-        h = self.act(self.norm2(h))
-        h = self.dropout_nn(h)
-        h = self.conv2d_2(h)
 
-        if self.in_features!= self.out_features:
-            
-            if self.conv_shortcut:
-                x = self.conv2d_3(x) # out_features
-            else:
-                x = self.linear_2(x)
+        for module in self.block2:
+            h = module(h)
+
+        if self.layers != None:
+            for module in self.layers:
+                x = module(x)
 
         return x + h
 
@@ -131,6 +133,7 @@ class FLOWERDDPMModel(pl.LightningModule):
         self.t_max = config['t_max']
         self.latent_dim = config['latent_dim']
         self.sampling_period = config['sampling_period']
+        self.warmup_step = config['warmup_step']
         self.ch = h_dims[1]
         
         self.linear_1 = Custumnn.Linear(h_dims[1], h_dims[1] * 4)
@@ -212,19 +215,44 @@ class FLOWERDDPMModel(pl.LightningModule):
 
         return h
 
+    def generate_noise(self, x_0: Tensor, seeds=None) -> Tensor:
+        B, C, H, W = x_0.shape
+        device = x_0.device
+        if seeds==None:
+            seeds = torch.sum(x_0.view(B, -1), dim=1).long()
+        noises = []
+        for seed in seeds:
+            generator = torch.Generator(device=device)
+            generator.manual_seed(int(seed.item()))
+            noise = torch.randn(C, H, W, generator=generator, device=device)
+            noises.append(noise)
+
+        return torch.stack(noises)
     def training_step(self, batch, batch_idx):
         x_0, y = batch
         self.curr_device = x_0.device
+
+        if self.current_epoch<self.warmup_step:
+            seeds = torch.ones((x_0.shape[0],), device=self.curr_device).long()*42
+        else:
+            seeds = None
+        noise = self.generate_noise(x_0, seeds)
         t = torch.randint(self.t_min, self.t_max, (x_0.shape[0],), device=x_0.device)
-        loss = self.p_losses(x_0, t, model=self)
+        loss = self.p_losses(x_0, t, model=self, eps=noise)
         self.log('TL', loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
         x_0, y = batch
         self.curr_device = x_0.device
+
+        if self.current_epoch<self.warmup_step:
+            seeds = torch.ones((x_0.shape[0],), device=self.curr_device).long()*42
+        else:
+            seeds = None
+        noise = self.generate_noise(x_0, seeds)
         t = torch.randint(self.t_min, self.t_max, (x_0.shape[0],), device=x_0.device)
-        loss = self.p_losses(x_0, t, model=self)
+        loss = self.p_losses(x_0, t, model=self, eps=noise)
         self.log('Val Loss', loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
 
     def test_step(self, batch, batch_idx):
@@ -238,7 +266,7 @@ class FLOWERDDPMModel(pl.LightningModule):
         return torch.optim.Adam(self.parameters(), lr=self.config['learning_rate'])
 
     def on_validation_end(self) -> None:
-        if self.current_epoch % self.save_period == 0:
+        if self.current_epoch % self.sampling_period == 0:
             self.sample_images()
     # ============================================================
     # ============================================================
@@ -248,7 +276,19 @@ class FLOWERDDPMModel(pl.LightningModule):
         test_input, test_label = next(iter(self.trainer.datamodule.test_dataloader()))
         test_input = test_input.to(self.curr_device)
         test_label = test_label.to(self.curr_device)
+        
+        seeds = torch.ones((test_input.shape[0],), device=self.curr_device)
+        noise = self.generate_noise(test_input, seeds)
+        recons = self.sample(16, current_device=self.curr_device, noise=noise)
+        recons_dir = os.path.join(self.logger.log_dir, "Reconstructions")
+        os.makedirs(recons_dir, exist_ok=True)
 
+        vutils.save_image(recons.data,
+                          os.path.join(recons_dir,
+                                       f"recons_{self.logger.name}_Epoch_{self.current_epoch}.png"),
+                          normalize=True,
+                          nrow=4)
+        
         try:
             samples = self.sample(16, current_device=self.curr_device)
             
@@ -348,7 +388,9 @@ class FLOWERDDPMModel(pl.LightningModule):
     
     def sample(self,
                num_samples:int,
-               current_device: int, **kwargs) -> Tensor:
+               current_device: int, 
+               noise=None,
+               **kwargs) -> Tensor:
         """
         Samples from the latent space and return the corresponding
         image space map.
@@ -357,13 +399,18 @@ class FLOWERDDPMModel(pl.LightningModule):
         :return: (Tensor)
         """
         x_T = torch.randn([num_samples] + self.latent_dim, device=current_device)
+        if noise == None:
+            noise = x_T
+        # ==============================
+        x_T = noise
+        # ==============================
         x_t = x_T
         T = self.t_max
         t_tensor = torch.ones((x_T.shape[0],), device=current_device) * T
 
         t=self.t_max
         while t>=1:
-            x_t_1 = self.p_sample(x_t, t_tensor, model=self)
+            x_t_1 = self.p_sample(x_t, t_tensor, model=self, eps=noise)
             t_tensor -= 1
             t-=1
         x_1 = x_t_1

@@ -3,10 +3,9 @@ from torch import Tensor
 from torch import nn
 
 class Linear(nn.Module):
-    def __init__(self, in_features, out_features, init_scale=1.):
+    def __init__(self, in_features, out_features):
         super().__init__()
         self.linear = nn.Linear(in_features, out_features)
-        nn.init.normal_(self.linear.weight, mean=0.0, std=init_scale)
     def forward(self, x: Tensor) -> Tensor:
         
         expansion = False

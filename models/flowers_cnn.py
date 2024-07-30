@@ -1,4 +1,5 @@
 import os
+import numpy as np
 from typing import *
 import torch
 from torch import Tensor
@@ -49,6 +50,10 @@ class FLOWERCNNModel(pl.LightningModule):
         
         self.train_accuracy = Accuracy(task="multiclass", num_classes=self.num_classes)
         self.val_accuracy = Accuracy(task="multiclass", num_classes=self.num_classes)
+
+        self.train_losses = []
+        self.val_losses = []
+        self.test_losses = []
     def forward(self, x):
         h = x
         for module in self.Downsampling:
@@ -65,9 +70,17 @@ class FLOWERCNNModel(pl.LightningModule):
         loss = F.nll_loss(logits, y)
         preds = torch.argmax(logits, dim=1)
         acc = self.train_accuracy(preds, y)
-        self.log('TL', loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
-        self.log('TA', acc, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log('Train Loss', loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log('Train Acc', acc, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+
+        self.train_losses.append(loss.item())
         return loss
+
+    def on_train_epoch_end(self):
+        # 에포크 종료 시 평균 손실 계산 및 저장
+        avg_loss = np.mean(self.train_losses)
+        self.train_losses = []  # 리스트 초기화
+        self.save_loss('train', avg_loss)
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
@@ -77,6 +90,13 @@ class FLOWERCNNModel(pl.LightningModule):
         acc = self.val_accuracy(preds, y)
         self.log('Val Loss', loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log('Val Acc', acc, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+
+        self.val_losses.append(loss.item())
+
+    def on_validation_epoch_end(self):
+        avg_loss = np.mean(self.val_losses)
+        self.val_losses = []
+        self.save_loss('val', avg_loss)
 
     def test_step(self, batch, batch_idx):
         x, y = batch
@@ -90,3 +110,12 @@ class FLOWERCNNModel(pl.LightningModule):
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.config['learning_rate'])
 
+    def save_loss(self, phase, loss):
+        save_path = os.path.join(self.logger.log_dir, f'{phase}_losses.npy')
+        if self.trainer.is_global_zero:  # Preventing duplication for multi GPU environment
+            try:
+                losses = np.load(save_path)
+                losses = np.append(losses, loss)
+            except FileNotFoundError:
+                losses = np.array([loss])
+            np.save(save_path, losses)
