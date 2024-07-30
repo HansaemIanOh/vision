@@ -17,6 +17,7 @@ class FLOWERVAEModel(pl.LightningModule):
         patch_size = config['patch_size']
         self.latent_dim = config['latent_dim']
         self.kld_weight = config['kld_weight']
+        self.sampling_period = config['sampling_period']
         num_channels = len(h_dims)
         # Downsample
         self.Downsampling = nn.ModuleList()
@@ -132,7 +133,8 @@ class FLOWERVAEModel(pl.LightningModule):
         return torch.optim.Adam(self.parameters(), lr=self.config['learning_rate'])
     
     def on_validation_end(self) -> None:
-        self.sample_images()
+        if self.current_epoch % self.save_period == 0:
+            self.sample_images()
     
     def sample(self, num_samples):
         

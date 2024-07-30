@@ -1,5 +1,5 @@
-import math
 import os
+import math
 from typing import *
 import torch
 from torch import Tensor
@@ -11,29 +11,6 @@ import torchvision.utils as vutils
 from . import Custumnn
 
 def match_dims(x, y): return list(x.shape) + [1] * (len(y.shape)-len(x.shape))
-
-class Linear(nn.Module):
-    def __init__(self, in_features, out_features):
-        super().__init__()
-        self.linear = nn.Linear(in_features, out_features)
-    def forward(self, x: Tensor) -> Tensor:
-        
-        expansion = False
-        if len(x.shape) > 2:
-            expansion = True
-        if expansion:
-            order, inverse_order = self.reorder_dimensions(len(x.shape))
-            x = x.permute(order).contiguous()
-        x = self.linear(x)
-        if expansion:
-            x = x.permute(inverse_order).contiguous()
-        return x
-    @staticmethod
-    def reorder_dimensions(shape_len):
-        order = list(range(shape_len))
-        order = [0] + order[2:] + [1]
-        inverse_order = [order.index(i) for i in range(shape_len)]
-        return order, inverse_order
 
 class DownBlock(nn.Module):
     def __init__(self, in_features, out_features, act, with_conv=True):
@@ -75,8 +52,8 @@ class ResNetBlock(nn.Module):
         self.conv2d_2 = nn.Conv2d(out_features, out_features, kernel_size=(3, 3), stride=1, padding=1)
         self.conv2d_3 = nn.Conv2d(in_features, out_features, kernel_size=(3, 3), stride=1, padding=1)
 
-        self.norm1 = nn.GroupNorm(num_groups=in_features, num_channels=in_features)
-        self.norm2 = nn.GroupNorm(num_groups=out_features, num_channels=out_features)
+        self.norm1 = nn.BatchNorm2d(in_features)
+        self.norm2 = nn.BatchNorm2d(out_features)
 
         self.linear_1 = Custumnn.Linear(time_features, out_features)
         self.linear_2 = Custumnn.Linear(in_features, out_features)
@@ -88,7 +65,7 @@ class ResNetBlock(nn.Module):
         self.time_features = time_features
     def forward(self, x : Tensor, temb=None) -> Tensor:
         if temb==None:
-            temb = torch.randint(0, 1000, (x.shape[0], 64), device=x.device, dtype=x.dtype)
+            temb = torch.randint(0, self.t_max, (x.shape[0], 64), device=x.device, dtype=x.dtype)
         h = x
         h = self.act(self.norm1(h))
         h = self.conv2d_1(h)
@@ -112,7 +89,7 @@ class AttnBlock(nn.Module):
         super().__init__()
         self.linear1 = Custumnn.Linear(features, features)
         self.linear2 = Custumnn.Linear(features, features)
-        self.norm = nn.GroupNorm(num_groups=features, num_channels=features)
+        self.norm = nn.BatchNorm2d(features)
 
     def forward(self, x : Tensor, temb : Tensor) -> Tensor:
         
@@ -139,238 +116,141 @@ def timeembed(timesteps: Tensor, embedding_dim: int) -> Tensor:
 
     return emb
 
-class UNet(nn.Module):
-    
-    def __init__(self,
-                 *,
-                 ch,
-                 out_ch,
-                 ch_mult = (1, 1, 2, 2, 4, 4),
-                 num_res_blocks,
-                 attn_resolutions,
-                 dropout=0.,
-                 resamp_with_conv = True,
-                 img_size,
-                 **kwargs):
+class FLOWERDDPMModel(pl.LightningModule):
+    def __init__(self, config, **kwargs):
         super().__init__()
-        self.act = nn.GELU()
-        self.linear = Custumnn.Linear
-        self.conv2d = nn.Conv2d
-        self.down = DownBlock
-        self.up = UpBlock
-        self.resnet = ResNetBlock
-        self.attn = AttnBlock
-
-        self.ch = ch
-        self.out_ch = out_ch
-        self.ch_mult = ch_mult
-        self.num_res_blocks = num_res_blocks
-        self.attn_resolutions = attn_resolutions
-        self.dropout = dropout
-        self.resamp_with_conv = resamp_with_conv
-
-        self.linear_1 = self.linear(self.ch, self.ch * 4)
-        self.linear_2 = self.linear(self.ch * 4, self.ch * 4)
-        self.time_features = self.ch * 4
+        self.config = config
+        h_dims = config['h_dims'] # [3, 16, 32, 64, 128, 256]
+        patch_size = config['patch_size']
+        self.act = nn.LeakyReLU()
+        self.attn_resolutions = config['attn_res']
+        self.with_conv = config['with_conv']
+        self.dropout = config['dropout']
+        num_channels = len(h_dims)
+        self.t_min = 0
+        self.t_max = config['t_max']
+        self.latent_dim = config['latent_dim']
+        self.sampling_period = config['sampling_period']
+        self.ch = h_dims[1]
         
-        num_resolutions = len(self.ch_mult)
-
-        assert type(self.ch) == int, "channel type is not int!!"
-        self.start = self.conv2d(3, self.ch, kernel_size=(3, 3), stride=1, padding=1)
-        # Downsampling
-        # self.Downsampling = []
+        self.linear_1 = Custumnn.Linear(h_dims[1], h_dims[1] * 4)
+        self.linear_2 = Custumnn.Linear(h_dims[1] * 4, h_dims[1] * 4)
+        self.time_features = h_dims[1] * 4
+        
+        # Downsample
         self.Downsampling = nn.ModuleList()
-        in_features = self.ch
-        f_res = img_size
-        for i_level in range(num_resolutions):
-            for i_block in range(self.num_res_blocks):
-                self.Downsampling.append(
-                    self.resnet(in_features=in_features, out_features=self.ch * self.ch_mult[i_level], 
-                                act=self.act, time_features=self.time_features, dropout=self.dropout,
-                                )
-                )
-                in_features = self.ch * self.ch_mult[i_level]
-                if f_res in self.attn_resolutions:
-                    self.Downsampling.append(self.attn(in_features, in_features))
+        
+        f_res = patch_size # [224, 112, 56, 28, 14, 7]
+        for index in range(0, num_channels-1):
+            in_channels = h_dims[index]
+            out_channels = h_dims[index+1]
+            self.Downsampling.append(
+                ResNetBlock(in_features=in_channels, out_features=out_channels, act=self.act, time_features=self.time_features)
+            )
+            if f_res in self.attn_resolutions:
+                self.Downsampling.append(AttnBlock(features=out_channels))
             # Downsample
-            if i_level != num_resolutions - 1:
-                self.Downsampling.append(self.down(in_features, in_features, act=self.act, with_conv=self.resamp_with_conv))
-                f_res /= 2
+            self.Downsampling.append(DownBlock(in_features=out_channels, out_features=out_channels, act=self.act, with_conv=self.with_conv))
+            f_res /= 2
+        
         # Middle
         self.Middle = nn.ModuleList()
-        self.Middle.append(self.resnet(in_features, in_features, self.act, self.time_features, dropout=self.dropout))
-        self.Middle.append(self.attn(in_features))
-        self.Middle.append(self.resnet(in_features, in_features, self.act, self.time_features, dropout=self.dropout))
+        self.Middle.append(ResNetBlock(out_channels, out_channels, self.act, self.time_features, dropout=self.dropout))
+        self.Middle.append(AttnBlock(out_channels))
+        self.Middle.append(ResNetBlock(out_channels, out_channels, self.act, self.time_features, dropout=self.dropout))
 
         # Upsampling
+        h_dims.reverse()
         self.Upsampling = nn.ModuleList()
-        for i_level in reversed(range(num_resolutions)):
-            for i_block in range(self.num_res_blocks + 1):
-                self.Upsampling.append(
-                    self.resnet(in_features=in_features, out_features=self.ch * self.ch_mult[i_level], 
-                                act=self.act, time_features=self.time_features, dropout=self.dropout, 
-                                )
-                )
-                in_features = self.ch * self.ch_mult[i_level]
-                if f_res in self.attn_resolutions:
-                    self.Upsampling.append(self.attn(in_features, in_features))
+        for index in range(0, num_channels-1):
+            in_channels = h_dims[index]
+            out_channels = h_dims[index+1]
             # Upsample
-            if i_level != 0:
-                self.Upsampling.append(self.up(in_features, in_features, act=self.act, with_conv=self.resamp_with_conv))
-                f_res *= 2
-        # End
+            self.Upsampling.append(UpBlock(in_features=in_channels, out_features=in_channels, act=self.act, with_conv=self.with_conv))
+            self.Upsampling.append(
+                ResNetBlock(in_features=in_channels, out_features=out_channels, act=self.act, time_features=self.time_features)
+            )
+            if f_res in self.attn_resolutions:
+                self.Upsampling.append(AttnBlock(features=out_channels))
+            f_res *= 2
+                # End
         self.End = nn.ModuleList()
         self.End.append(nn.Sequential(
-            nn.GroupNorm(num_groups=in_features, num_channels=in_features),
+            nn.GroupNorm(num_groups=out_channels, num_channels=out_channels),
             self.act,
-            self.conv2d(in_features, self.out_ch, kernel_size=(3, 3), stride=1, padding=1)
+            nn.Conv2d(out_channels, out_channels, kernel_size=(3, 3), stride=1, padding=1)
         ))
+    
     def forward(self, x : Tensor, t= None) -> Tensor:
-        
         if t == None:
-            t = torch.randint(low=0, high=1000, size=(x.shape[0],), device=x.device)
+            print("Test mode. It can't be trained.")
+            t = t+1
+            t = torch.randint(low=self.t_min, high=self.t_max, size=(x.shape[0],), device=x.device)
         h = x
         # Timestep embedding
         temb = timeembed(t, self.ch)
+
         temb = self.linear_1(temb)
         temb = self.linear_2(self.act(temb))
 
-        # Start
-
-        h = self.start(h)
-        
         # Downsampling
-
         for module in self.Downsampling:
+            # print(h.shape)
             h = module(h, temb)
-
         # Middle
-
         for module in self.Middle:
+            # print(h.shape)
             h = module(h, temb)
-
         # Upsampling
-
         for module in self.Upsampling:
+            # print(h.shape)
             h = module(h, temb)
-
         # End
-
         for module in self.End:
+            # print(h.shape)
             h = module(h)
+
         return h
 
-class DDPM_Model(pl.LightningModule):
-    
-    def __init__(self,
-                 t_max=1000,
-                 *,
-                 ch,
-                 out_ch,
-                 ch_mult = (1, 2, 4, 8),
-                 num_res_blocks,
-                 attn_resolutions,
-                 dropout=0.,
-                 resamp_with_conv = True,
-                 img_size,
-                 latent_dim,
-                 **kwargs) -> None:
-        super().__init__()
-        self.t_max = t_max
-        self.latent_dim = latent_dim
-        self.model = UNet(ch=ch, 
-                          out_ch=out_ch, 
-                          ch_mult=ch_mult, 
-                          num_res_blocks=num_res_blocks, 
-                          attn_resolutions=attn_resolutions, 
-                          dropout=dropout, 
-                          resamp_with_conv=resamp_with_conv,
-                          img_size=img_size)
-
-    def forward(self, 
-                input : Tensor, 
-                t=None, 
-                **kwargs) -> List[Tensor]:
-        return self.model(input, t)    
-        # # assert t != None, "T is none type" T 스케쥴링 꼭 해야함. 안하면 훈련이 안됨.
-
-        # if t==None:
-        #     print("time is None")
-        #     t = torch.randint(0, 1000, (input.shape[0],), device=input.device)
-        # eps_theta = self.model(input, t=t) # UNet
-
-        # return [eps_theta, input, t]
-
-    # def loss_function(self,
-    #                   *args,
-    #                   **kwargs) -> dict:
-    #     # [eps_theta, input]
-    #     x_start = args[1]
-    #     t = args[2]
-    #     loss = self.p_losses(x_start=x_start, t=t, model=self.model) # UNet
-
-    #     return {'loss': loss}
     def training_step(self, batch, batch_idx):
-        x, _ = batch
-        self.curr_device = x.device
-        x_rec, mu, logvar = self(x)
-        rec_loss = F.mse_loss(x_rec, x)
-        kld_loss = torch.mean(-0.5 * torch.sum(1 + logvar - mu ** 2 - logvar.exp(), dim = 1), dim = 0)
-        loss = rec_loss + self.kld_weight * kld_loss
+        x_0, y = batch
+        self.curr_device = x_0.device
+        t = torch.randint(self.t_min, self.t_max, (x_0.shape[0],), device=x_0.device)
+        loss = self.p_losses(x_0, t, model=self)
         self.log('TL', loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
-        x, _ = batch
-        self.curr_device = x.device
-        x_rec, mu, logvar = self(x)
-        rec_loss = F.mse_loss(x_rec, x)
-        kld_loss = torch.mean(-0.5 * torch.sum(1 + logvar - mu ** 2 - logvar.exp(), dim = 1), dim = 0)
-        loss = rec_loss + self.kld_weight * kld_loss
+        x_0, y = batch
+        self.curr_device = x_0.device
+        t = torch.randint(self.t_min, self.t_max, (x_0.shape[0],), device=x_0.device)
+        loss = self.p_losses(x_0, t, model=self)
         self.log('Val Loss', loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
 
     def test_step(self, batch, batch_idx):
-        x, y = batch
-        x_rec, mu, logvar = self(x)
-        rec_loss = F.mse_loss(x_rec, x)
-        kld_loss = torch.mean(-0.5 * torch.sum(1 + logvar - mu ** 2 - logvar.exp(), dim = 1), dim = 0)
-        loss = rec_loss + self.kld_weight * kld_loss
+        x_0, y = batch
+        self.curr_device = x_0.device
+        t = torch.randint(self.t_min, self.t_max, (x_0.shape[0],), device=x_0.device)
+        loss = self.p_losses(x_0, t, model=self)
         self.log('Test Loss', loss, on_step=False, on_epoch=True, sync_dist=True)
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.config['learning_rate'])
-    
-    def on_validation_end(self) -> None:
-        self.sample_images()
-    
-    def sample(self, num_samples):
-        
-        z = torch.randn(num_samples, self.latent_dim, device=self.curr_device)
 
-        # Retoration
-        z = self.FC_restore(z)
-        h = z.view([-1, self.latent_ch, self.latent_res, self.latent_res])
-        
-        # Decoder
-        h = self.decode(h)
-        return h
+    def on_validation_end(self) -> None:
+        if self.current_epoch % self.save_period == 0:
+            self.sample_images()
+    # ============================================================
+    # ============================================================
+    # ============================================================
+
     def sample_images(self):
         test_input, test_label = next(iter(self.trainer.datamodule.test_dataloader()))
         test_input = test_input.to(self.curr_device)
         test_label = test_label.to(self.curr_device)
 
-        recons = self(test_input)[0]
-        recons_dir = os.path.join(self.logger.log_dir, "Reconstructions")
-        os.makedirs(recons_dir, exist_ok=True)
-
-        vutils.save_image(recons.data,
-                          os.path.join(recons_dir,
-                                       f"recons_{self.logger.name}_Epoch_{self.current_epoch}.png"),
-                          normalize=True,
-                          nrow=4)
-
         try:
-            samples = self.sample(16)
+            samples = self.sample(16, current_device=self.curr_device)
             
             samples_dir = os.path.join(self.logger.log_dir, "Samples")
             os.makedirs(samples_dir, exist_ok=True)
@@ -382,39 +262,7 @@ class DDPM_Model(pl.LightningModule):
                               nrow=4)
         except Warning:
             pass
-    def loss_function(self,
-                      x_start,
-                      **kwargs) -> dict:
-        # [eps_theta, input]
-        
-        loss = self.inner_loop(x_start)
-
-        return {'loss': loss}
     
-    def t_sample(self, x_start, low, high):
-        return torch.arange(low, high+1, device=x_start.device)
-
-    def inner_loop(self, x_0): # x_0만 주면 알아서 loss 전부 계산해서 반환하는 형식임.
-        
-        t_max = self.t_max
-        t_min = 0
-
-        inner_batch = 20
-        x_0_repeat = x_0.repeat(inner_batch, 1, 1, 1)
-
-        loss = 0
-        # for cur_time in range(t_min, t_max, inner_batch):
-        #     t = self.t_sample(x_0, cur_time+1, cur_time+inner_batch)
-            # t_expanded = t.view(match_dims(t, x_0_repeat))
-            # print("="*50)
-            # print(x_0_repeat.shape, t_expanded.shape)
-            # print("="*50)
-            # exit()
-            # loss += self.p_losses(x_start=x_0_repeat, t=t, model=self.model)
-        t = torch.randint(t_min, t_max, (x_0_repeat.shape[0],), device=x_0_repeat.device)
-        loss = self.p_losses(x_start=x_0_repeat, t=t, model=self.model)
-        return loss
-
     def beta_func(self, t): # return beta
         beta_min = 0.0001
         beta_max = 0.02
@@ -455,8 +303,8 @@ class DDPM_Model(pl.LightningModule):
 
         assert torch.all(t > 0), "Time in p_sample is zero"
         
-        c_0 = (torch.sqrt(alpha_bar_t_1) * beta) / (torch.sqrt(1 - alpha_bar_t))
-        c_t = (torch.sqrt(alpha_bar_t) * (1 - alpha_bar_t_1)) / (torch.sqrt(1 - alpha_bar_t))
+        c_0 = (torch.sqrt(alpha_bar_t_1) * beta) / ((1 - alpha_bar_t))
+        c_t = (torch.sqrt(alpha_bar_t) * (1 - alpha_bar_t_1)) / ((1 - alpha_bar_t))
         
         c_0 = c_0.view(match_dims(c_0, x_start))
         c_t = c_t.view(match_dims(c_t, x_t))
@@ -478,11 +326,9 @@ class DDPM_Model(pl.LightningModule):
         
         x_t = self.q_sample(x_start=x_start, t=t, eps=eps) # q(x_t | x_0) \eps_\theta(c_1 x_0 + c_2 \eps, t)
         eps_theta = model(x_t, t)
-        # losses = (noise - x_recon).flatten(1).pow(2).mean(1)
-        
-        losses = F.mse_loss(eps, eps_theta)
 
-        # assert losses.shape == x_start.shape[0]
+        losses = F.mse_loss(eps_theta, eps)
+
         return losses # scalar
 
     def p_sample(self, x_t : Tensor, t, eps=None, model=None, sigma_cal=False):
@@ -515,9 +361,9 @@ class DDPM_Model(pl.LightningModule):
         T = self.t_max
         t_tensor = torch.ones((x_T.shape[0],), device=current_device) * T
 
-        t=1000
+        t=self.t_max
         while t>=1:
-            x_t_1 = self.p_sample(x_t, t_tensor, model=self.model)
+            x_t_1 = self.p_sample(x_t, t_tensor, model=self)
             t_tensor -= 1
             t-=1
         x_1 = x_t_1
@@ -525,3 +371,4 @@ class DDPM_Model(pl.LightningModule):
         x_0 = x_1
         return x_0
     
+
