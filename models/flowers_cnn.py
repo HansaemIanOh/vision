@@ -14,6 +14,8 @@ class FLOWERCNNModel(pl.LightningModule):
         self.config = config
         h_dims = config['h_dims'] # [3, 16, 32, 64, 128, 256]
         patch_size = config['patch_size']
+        self.dropout = config['dropout']
+        self.num_classes = config['num_classes']
 
         num_channels = len(h_dims)
         # Downsample
@@ -40,12 +42,13 @@ class FLOWERCNNModel(pl.LightningModule):
             nn.Sequential(
             nn.Linear(self.latent_ch, 256),
             nn.ReLU(),
-            nn.Linear(256, 10),
+            nn.Dropout(self.dropout),
+            nn.Linear(256, self.num_classes),
             )
         )
         
-        self.train_accuracy = Accuracy(task="multiclass", num_classes=10)
-        self.val_accuracy = Accuracy(task="multiclass", num_classes=10)
+        self.train_accuracy = Accuracy(task="multiclass", num_classes=self.num_classes)
+        self.val_accuracy = Accuracy(task="multiclass", num_classes=self.num_classes)
     def forward(self, x):
         h = x
         for module in self.Downsampling:
