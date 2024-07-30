@@ -42,7 +42,7 @@ def model_summary(model, input_size=(1, 3, 224, 224)):
     summary(model, input_size=(1, 3, 224, 224))
 if config['log_config']['model_summary']:
     model_summary(model, input_size=(1, 3, 224, 224))
-
+exit()
 # Checkpoint callback
 checkpoint_callback = ModelCheckpoint(
     dirpath='logs/'+config['log_config']['name']+'/'+'checkpoint',

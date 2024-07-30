@@ -187,7 +187,6 @@ class FLOWERDDPMModel(pl.LightningModule):
     def forward(self, x : Tensor, t= None) -> Tensor:
         if t == None:
             print("Test mode. It can't be trained.")
-            t = t+1
             t = torch.randint(low=self.t_min, high=self.t_max, size=(x.shape[0],), device=x.device)
         h = x
         # Timestep embedding

@@ -32,5 +32,5 @@ log_config:
   save_dir: "logs/"
   check_dir: "logs/check"
   checkpoint_path: None
-  model_summary: False
+  model_summary: True
   
