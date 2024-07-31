@@ -108,7 +108,19 @@ class FLOWERCNNModel(pl.LightningModule):
         self.log('Test Acc', acc, on_step=False, on_epoch=True, sync_dist=True)
 
     def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=self.config['learning_rate'])
+        optimizer = \
+        torch.optim.Adam(
+            self.parameters(),
+            lr=self.config['learning_rate'],
+            weight_decay=self.config['weight_decay']
+            )
+
+        try:
+            if self.config['scheduler_gamma'] is not None:
+                scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer = optimizer, gamma = self.config['scheduler_gamma'])
+                return [optimizer], [scheduler]
+        except:
+            return optimizer
 
     def save_loss(self, phase, loss):
         save_path = os.path.join(self.logger.log_dir, f'{phase}_losses.npy')
@@ -119,3 +131,4 @@ class FLOWERCNNModel(pl.LightningModule):
             except FileNotFoundError:
                 losses = np.array([loss])
             np.save(save_path, losses)
+

@@ -105,35 +105,35 @@ class AttnBlock(nn.Module):
         h = self.linear2(h)
         return x + h
 
-def timeembed(timesteps: Tensor, embedding_dim: int) -> Tensor:
-
-    half_dim = embedding_dim // 2
-    emb = math.log(10000) / (half_dim - 1)
-    emb = torch.exp(torch.arange(half_dim, device=timesteps.device) * -emb)
-    emb = timesteps.float()[:, None] * emb[None, :]
-    emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)
-
-    if embedding_dim % 2 == 1:  # zero pad
-        emb = F.pad(emb, (0, 1))
-
-    return emb
+def timeembed(t, embedding_dim):
+    frequencies = torch.exp(
+        torch.linspace(
+            torch.math.log(1.0),
+            torch.math.log(1000.0),
+            embedding_dim // 2,
+            device=t.device
+        ).reshape(1, embedding_dim // 2, 1, 1)
+    )
+    angular_speeds = 2.0 * math.pi * frequencies
+    embeddings = torch.concat([torch.sin(angular_speeds * t), torch.cos(angular_speeds * t)], dim=1)
+    return embeddings
 
 class FLOWERDDPMModel(pl.LightningModule):
     def __init__(self, config, **kwargs):
         super().__init__()
         self.config = config
         h_dims = config['h_dims'] # [3, 16, 32, 64, 128, 256]
+        self.h_dims=h_dims
         patch_size = config['patch_size']
+        self.patch_size = patch_size
         self.act = nn.LeakyReLU()
         self.attn_resolutions = config['attn_res']
         self.with_conv = config['with_conv']
         self.dropout = config['dropout']
         num_channels = len(h_dims)
-        self.t_min = 0
-        self.t_max = config['t_max']
         self.latent_dim = config['latent_dim']
         self.sampling_period = config['sampling_period']
-        self.warmup_step = config['warmup_step']
+        self.diffusion_steps = config['diffusion_steps']
         self.ch = h_dims[1]
         
         self.linear_1 = Custumnn.Linear(h_dims[1], h_dims[1] * 4)
@@ -181,115 +181,140 @@ class FLOWERDDPMModel(pl.LightningModule):
         self.End.append(nn.Sequential(
             nn.GroupNorm(num_groups=out_channels, num_channels=out_channels),
             self.act,
-            nn.Conv2d(out_channels, out_channels, kernel_size=(3, 3), stride=1, padding=1)
+            nn.Conv2d(out_channels, out_channels, kernel_size=(3, 3), stride=1, padding=1),
         ))
     
     def forward(self, x : Tensor, t= None) -> Tensor:
         if t == None:
             print("Test mode. It can't be trained.")
-            t = torch.randint(low=self.t_min, high=self.t_max, size=(x.shape[0],), device=x.device)
+            t = torch.rand((x.shape[0],1, 1, 1), device=x.device) * 0
         h = x
         # Timestep embedding
         temb = timeembed(t, self.ch)
-
         temb = self.linear_1(temb)
         temb = self.linear_2(self.act(temb))
 
         # Downsampling
         for module in self.Downsampling:
-            # print(h.shape)
             h = module(h, temb)
         # Middle
         for module in self.Middle:
-            # print(h.shape)
             h = module(h, temb)
         # Upsampling
         for module in self.Upsampling:
-            # print(h.shape)
             h = module(h, temb)
         # End
         for module in self.End:
-            # print(h.shape)
             h = module(h)
 
         return h
+    # Cosine scheduler
+    def diffusion_schedule(self, diffusion_times: int) -> List[Tensor]:
+        min_signal_rate = 0.02
+        max_signal_rate = 0.95
+        min_signal_rate = torch.tensor(min_signal_rate, device=self.curr_device)
+        max_signal_rate = torch.tensor(max_signal_rate, device=self.curr_device)
 
-    def generate_noise(self, x_0: Tensor, seeds=None) -> Tensor:
-        B, C, H, W = x_0.shape
-        device = x_0.device
-        if seeds==None:
-            seeds = torch.sum(x_0.view(B, -1), dim=1).long()
-        noises = []
-        for seed in seeds:
-            generator = torch.Generator(device=device)
-            generator.manual_seed(int(seed.item()))
-            noise = torch.randn(C, H, W, generator=generator, device=device)
-            noises.append(noise)
+        start_angle = torch.acos(max_signal_rate)
+        end_angle = torch.acos(min_signal_rate)
+        diffusion_angles = start_angle + diffusion_times * (end_angle - start_angle)
 
-        return torch.stack(noises)
+        signal_rates = torch.cos(diffusion_angles)
+        noise_rates = torch.sin(diffusion_angles)
+
+        return noise_rates, signal_rates
+
+    def denoise(self, x_t : Tensor, noise_rates, signal_rates) -> Tensor:
+        pred_noises = self(x_t, noise_rates**2)
+        pred_images = (x_t - noise_rates * pred_noises) / signal_rates # mu = (x_t - beta/root(1-alpha_bar)eps) / root(alpha)
+        return pred_noises, pred_images
+
+    def p_loss(self, images):
+        noises = torch.randn_like(images, dtype=images.dtype, device=images.device)
+        diffusion_times = torch.rand((images.shape[0], 1, 1, 1), device=images.device)
+        noise_rates, signal_rates = self.diffusion_schedule(diffusion_times) # \sqrt{alpha_bar}, \sqrt{alpha_bar}
+        noisy_images = signal_rates * images + noise_rates * noises
+        pred_noises, pred_images = self.denoise(noisy_images, noise_rates, signal_rates)
+        loss = F.mse_loss(pred_noises, noises)
+        return loss
+
+    def reverse_diffusion(self, initial_noise, diffusion_steps):
+        num_images = initial_noise.shape[0]
+        step_size = 1.0 / diffusion_steps
+        current_images = initial_noise
+        for step in range(diffusion_steps):
+            diffusion_times = torch.ones((num_images, 1, 1, 1), device=self.curr_device) - step * step_size
+            diffusion_times.to(self.curr_device)
+            noise_rates, signal_rates = self.diffusion_schedule(diffusion_times)
+            pred_noises, pred_images = self.denoise(
+                current_images, noise_rates, signal_rates
+            )
+            next_diffusion_times = diffusion_times - step_size
+            next_noise_rates, next_signal_rates = self.diffusion_schedule(
+                next_diffusion_times
+            )
+            current_images = (
+                next_signal_rates * pred_images + next_noise_rates * pred_noises # x_{t-1} = mu_\theta + sigma * noise
+            )
+        return pred_images
+
+    def generate(self, num_images, diffusion_steps, initial_noise=None):
+        if initial_noise is None:
+            initial_noise = torch.randn((num_images, 3, self.patch_size, self.patch_size), device=self.curr_device)
+        generated_images = self.reverse_diffusion(
+            initial_noise, diffusion_steps
+        )
+        return generated_images
+    # ============================================================
+    # ============================================================
+    # ============================================================
+
     def training_step(self, batch, batch_idx):
         x_0, y = batch
         self.curr_device = x_0.device
-
-        if self.current_epoch<self.warmup_step:
-            seeds = torch.ones((x_0.shape[0],), device=self.curr_device).long()*42
-        else:
-            seeds = None
-        noise = self.generate_noise(x_0, seeds)
-        t = torch.randint(self.t_min, self.t_max, (x_0.shape[0],), device=x_0.device)
-        loss = self.p_losses(x_0, t, model=self, eps=noise)
+        loss = self.p_loss(x_0)
         self.log('TL', loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
         x_0, y = batch
         self.curr_device = x_0.device
-
-        if self.current_epoch<self.warmup_step:
-            seeds = torch.ones((x_0.shape[0],), device=self.curr_device).long()*42
-        else:
-            seeds = None
-        noise = self.generate_noise(x_0, seeds)
-        t = torch.randint(self.t_min, self.t_max, (x_0.shape[0],), device=x_0.device)
-        loss = self.p_losses(x_0, t, model=self, eps=noise)
+        loss = self.p_loss(x_0)
         self.log('Val Loss', loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
 
     def test_step(self, batch, batch_idx):
         x_0, y = batch
         self.curr_device = x_0.device
-        t = torch.randint(self.t_min, self.t_max, (x_0.shape[0],), device=x_0.device)
-        loss = self.p_losses(x_0, t, model=self)
+        loss = self.p_loss(x_0)
         self.log('Test Loss', loss, on_step=False, on_epoch=True, sync_dist=True)
 
     def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=self.config['learning_rate'])
+        optimizer = \
+        torch.optim.Adam(
+            self.parameters(),
+            lr=self.config['learning_rate'],
+            weight_decay=self.config['weight_decay']
+            )
+
+        try:
+            if self.config['scheduler_gamma'] is not None:
+                scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer = optimizer, gamma = self.config['scheduler_gamma'])
+                return [optimizer], [scheduler]
+        except:
+            return optimizer
 
     def on_validation_end(self) -> None:
         if self.current_epoch % self.sampling_period == 0:
             self.sample_images()
-    # ============================================================
-    # ============================================================
-    # ============================================================
 
     def sample_images(self):
-        test_input, test_label = next(iter(self.trainer.datamodule.test_dataloader()))
+        # test_input, test_label = next(iter(self.trainer.datamodule.test_dataloader()))
+        test_input, test_label = next(iter(self.trainer.datamodule.train_dataloader()))
         test_input = test_input.to(self.curr_device)
         test_label = test_label.to(self.curr_device)
-        
-        seeds = torch.ones((test_input.shape[0],), device=self.curr_device)
-        noise = self.generate_noise(test_input, seeds)
-        recons = self.sample(16, current_device=self.curr_device, noise=noise)
-        recons_dir = os.path.join(self.logger.log_dir, "Reconstructions")
-        os.makedirs(recons_dir, exist_ok=True)
 
-        vutils.save_image(recons.data,
-                          os.path.join(recons_dir,
-                                       f"recons_{self.logger.name}_Epoch_{self.current_epoch}.png"),
-                          normalize=True,
-                          nrow=4)
-        
         try:
-            samples = self.sample(16, current_device=self.curr_device)
+            samples = self.generate(16, self.diffusion_steps)
             
             samples_dir = os.path.join(self.logger.log_dir, "Samples")
             os.makedirs(samples_dir, exist_ok=True)
@@ -301,120 +326,3 @@ class FLOWERDDPMModel(pl.LightningModule):
                               nrow=4)
         except Warning:
             pass
-    
-    def beta_func(self, t): # return beta
-        beta_min = 0.0001
-        beta_max = 0.02
-        beta_t = beta_min + (beta_max - beta_min) * (1 - t / self.t_max)
-        return beta_t
-
-    def alpha_func(self, t): # return alpha
-        return 1 - self.beta_func(t)
-
-    def alpha_cumprod_func(self, t):
-        alphas = self.alpha_func(torch.arange(int(t.max()) + 1, dtype=torch.float32, device=t.device))
-        alphas_cumprod = torch.cumprod(alphas, dim=0)
-        return alphas_cumprod[t.long()]
-
-    def q_sample(self, x_start : Tensor, t, eps): # q(x_t | x_0)
-        alpha_bar = self.alpha_cumprod_func(t)
-        alpha_bar = alpha_bar.view(match_dims(alpha_bar, x_start))
-        c_1 = torch.sqrt(alpha_bar)
-        c_2 = torch.sqrt(1-alpha_bar)
-        x_noisy = c_1 * x_start + c_2 * eps
-        return x_noisy
-
-    def q_reverse(self, x_t : Tensor, t, eps_theta): # q(x_0 | x_t)
-        alpha_bar = self.alpha_cumprod_func(t)
-        alpha_bar = alpha_bar.view(match_dims(alpha_bar, x_t))
-        x_start = (x_t - torch.sqrt(1 - alpha_bar) * eps_theta) / torch.sqrt(alpha_bar)
-        return x_start
-
-    def q_posterior(self, x_start, x_t : Tensor, t, sigma_cal=False):
-        """
-        Compute the mean and variance of the diffusion posterior q(x_{t-1} | x_t, x_0)
-        """
-        assert x_start.shape == x_t.shape
-        beta = self.beta_func(t)
-        alpha = self.alpha_func(t)
-        alpha_bar_t = self.alpha_cumprod_func(t)
-        alpha_bar_t_1 = self.alpha_cumprod_func(t-1)
-
-        assert torch.all(t > 0), "Time in p_sample is zero"
-        
-        c_0 = (torch.sqrt(alpha_bar_t_1) * beta) / ((1 - alpha_bar_t))
-        c_t = (torch.sqrt(alpha_bar_t) * (1 - alpha_bar_t_1)) / ((1 - alpha_bar_t))
-        
-        c_0 = c_0.view(match_dims(c_0, x_start))
-        c_t = c_t.view(match_dims(c_t, x_t))
-
-        mean = c_0 * x_start + c_t * x_t
-        if sigma_cal:
-            sigma_squared = (1 - self.alpha_cumprod_func(t-1)) / (1 - self.alpha_cumprod_func(t)) * beta
-        else:
-            sigma_squared = beta
-        sigma = torch.sqrt(sigma_squared)
-
-        return mean, sigma
-    
-    def p_losses(self, x_start : Tensor, t, eps=None, model=None):
-        # x_start, t, model 을 받아서 x_t, t를 만들고 그걸 모델에 넣어서 loss를 만듦.
-        assert model!=None, "Model is none"
-        if eps is None:
-            eps = torch.randn_like(x_start, dtype=x_start.dtype, device=x_start.device)
-        
-        x_t = self.q_sample(x_start=x_start, t=t, eps=eps) # q(x_t | x_0) \eps_\theta(c_1 x_0 + c_2 \eps, t)
-        eps_theta = model(x_t, t)
-
-        losses = F.mse_loss(eps_theta, eps)
-
-        return losses # scalar
-
-    def p_sample(self, x_t : Tensor, t, eps=None, model=None, sigma_cal=False):
-
-        assert model!=None, "Model is none"
-        if eps is None:
-            eps = torch.randn_like(x_t, dtype=x_t.dtype, device=x_t.device)
-
-        eps_theta = model(x_t, t)
-        
-        x_start = self.q_reverse(x_t, t, eps_theta)
-        
-        mean, sigma = self.q_posterior(x_t=x_t, t=t, x_start=x_start, sigma_cal=sigma_cal)
-        sigma = sigma.view(match_dims(sigma, x_t))
-        x_t_1 = mean + sigma * eps_theta # x_t_1 is x_{t-1}
-        return x_t_1
-    
-    def sample(self,
-               num_samples:int,
-               current_device: int, 
-               noise=None,
-               **kwargs) -> Tensor:
-        """
-        Samples from the latent space and return the corresponding
-        image space map.
-        :param num_samples: (Int) Number of samples
-        :param current_device: (Int) Device to run the model
-        :return: (Tensor)
-        """
-        x_T = torch.randn([num_samples] + self.latent_dim, device=current_device)
-        if noise == None:
-            noise = x_T
-        # ==============================
-        x_T = noise
-        # ==============================
-        x_t = x_T
-        T = self.t_max
-        t_tensor = torch.ones((x_T.shape[0],), device=current_device) * T
-
-        t=self.t_max
-        while t>=1:
-            x_t_1 = self.p_sample(x_t, t_tensor, model=self, eps=noise)
-            t_tensor -= 1
-            t-=1
-        x_1 = x_t_1
-        # x_0 = self.p_final(x_1)
-        x_0 = x_1
-        return x_0
-    
-
