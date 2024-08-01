@@ -35,8 +35,8 @@ seed_everything(config['model_config']['manual_seed'], True)
 model = get_model(config['model_config']['name'], config['model_config'])
 checkpoint = config['log_config']['checkpoint_path']
 if checkpoint != 'None':
-    model.load_from_checkpoint(checkpoint)
-# model = get_model(config['model_config'])
+    model.load_from_checkpoint(checkpoint, config=config['model_config'])
+
 @rank_zero_only
 def model_summary(model, input_size=(1, 3, 224, 224)):
     summary(model, input_size=(1, 3, 224, 224))
@@ -46,9 +46,9 @@ if config['log_config']['model_summary']:
 # Checkpoint callback
 checkpoint_callback = ModelCheckpoint(
     dirpath='logs/'+config['log_config']['name']+'/'+'checkpoint',
-    filename=config['log_config']['name']+'_'+'{val_loss:.2f}',
+    filename=config['log_config']['name']+'_'+'{VL:.5f}',
     save_top_k=1,
-    monitor='Val Loss'
+    monitor='VL'
 )
 
 trainer = pl.Trainer(

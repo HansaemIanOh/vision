@@ -1,0 +1,36 @@
+model_config:
+  name: 'vqvaeunet'
+  learning_rate: 0.001
+  manual_seed: 42
+  # h_dims:     [3, 32, 32, 64, 64, 128, 128] # 224, 112, 112, 56, 56, 28, 28
+  # down_index: [0,  1,  0,  1,  0,   1,   0] # 초기치는 무조건 0
+  h_dims:     [3, 64, 64, 128, 128, 256, 256] # 224, 112, 112, 56, 28, 14, 7
+  down_index: [0,  1,  0,   1,   1,   1,   1]
+  patch_size: 224
+  sampling_period: 1
+  embed_dim: 256
+  num_embed: 2048
+  attn_res: [7]
+  weight_decay: 0.001
+  scheduler_gamma: 0.99
+
+data_config:
+  data_dir: "data/butterfly"
+  batch_size: 16
+  patch_size: 224
+  num_workers: 4
+  use_manual_split: True
+
+
+trainer_config:
+  accelerator: 'gpu'
+  devices: 1  # 2 or [0, 1]
+  max_epochs: 500
+
+log_config:
+  name: "butterfly_vqvaeunet"
+  save_dir: "logs/"
+  check_dir: "logs/check"
+  checkpoint_path: None
+  model_summary: False
+  

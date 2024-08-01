@@ -9,7 +9,7 @@ from torchmetrics import Accuracy
 import torchvision.utils as vutils
 from . import Custumnn
 
-class FLOWERVAEModel(pl.LightningModule):
+class VAEModel(pl.LightningModule):
     def __init__(self, config, **kwargs):
         super().__init__()
         self.config = config
@@ -62,8 +62,7 @@ class FLOWERVAEModel(pl.LightningModule):
                 Custumnn.Linear(out_channels, out_channels),
                 nn.Sigmoid()
             ))
-        self.train_accuracy = Accuracy(task="multiclass", num_classes=10)
-        self.val_accuracy = Accuracy(task="multiclass", num_classes=10)
+
     def forward(self, x):
         h = x
 
@@ -119,7 +118,7 @@ class FLOWERVAEModel(pl.LightningModule):
         rec_loss = F.mse_loss(x_rec, x)
         kld_loss = torch.mean(-0.5 * torch.sum(1 + logvar - mu ** 2 - logvar.exp(), dim = 1), dim = 0)
         loss = rec_loss + self.kld_weight * kld_loss
-        self.log('Val Loss', loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log('VL', loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
 
     def test_step(self, batch, batch_idx):
         x, y = batch
@@ -127,7 +126,7 @@ class FLOWERVAEModel(pl.LightningModule):
         rec_loss = F.mse_loss(x_rec, x)
         kld_loss = torch.mean(-0.5 * torch.sum(1 + logvar - mu ** 2 - logvar.exp(), dim = 1), dim = 0)
         loss = rec_loss + self.kld_weight * kld_loss
-        self.log('Test Loss', loss, on_step=False, on_epoch=True, sync_dist=True)
+        self.log('TeL', loss, on_step=False, on_epoch=True, sync_dist=True)
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.config['learning_rate'])

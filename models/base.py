@@ -1,10 +1,14 @@
-from .flowers_vae import FLOWERVAEModel
-from .flowers_cnn import FLOWERCNNModel
-from .flowers_ddpm import FLOWERDDPMModel
+from .vae import VAEModel
+from .cnn import CNNModel
+from .ddpm import DDPMModel
+from .vqvae import VQVAEModel
+from .vqvaeunet import VQVAEUNETModel
 
-chose_model = {'flowers_vae':FLOWERVAEModel,
-               'flowers_cnn':FLOWERCNNModel,
-               'flowers_ddpm':FLOWERDDPMModel}
+chose_model = {'vae':VAEModel,
+               'cnn':CNNModel,
+               'ddpm':DDPMModel,
+               'vqvae':VQVAEModel,
+               'vqvaeunet':VQVAEUNETModel}
 
 def get_model(name, config):
     return chose_model[name](config)

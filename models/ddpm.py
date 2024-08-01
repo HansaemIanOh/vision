@@ -75,7 +75,8 @@ class ResNetBlock(nn.Module):
             h = module(h)
         
         temb = self.linear_temb(self.act(temb))
-        h+= temb.view(match_dims(temb, h))
+        # h+= temb.view(match_dims(temb, h))
+        h+= temb
 
         for module in self.block2:
             h = module(h)
@@ -118,7 +119,7 @@ def timeembed(t, embedding_dim):
     embeddings = torch.concat([torch.sin(angular_speeds * t), torch.cos(angular_speeds * t)], dim=1)
     return embeddings
 
-class FLOWERDDPMModel(pl.LightningModule):
+class DDPMModel(pl.LightningModule):
     def __init__(self, config, **kwargs):
         super().__init__()
         self.config = config
@@ -128,6 +129,7 @@ class FLOWERDDPMModel(pl.LightningModule):
         self.patch_size = patch_size
         self.act = nn.LeakyReLU()
         self.attn_resolutions = config['attn_res']
+        self.down_index = config['down_index']
         self.with_conv = config['with_conv']
         self.dropout = config['dropout']
         num_channels = len(h_dims)
@@ -153,8 +155,9 @@ class FLOWERDDPMModel(pl.LightningModule):
             if f_res in self.attn_resolutions:
                 self.Downsampling.append(AttnBlock(features=out_channels))
             # Downsample
-            self.Downsampling.append(DownBlock(in_features=out_channels, out_features=out_channels, act=self.act, with_conv=self.with_conv))
-            f_res /= 2
+            if self.down_index[index+1]==1:
+                self.Downsampling.append(DownBlock(in_features=out_channels, out_features=out_channels, act=self.act, with_conv=self.with_conv))
+                f_res /= 2
         
         # Middle
         self.Middle = nn.ModuleList()
@@ -164,25 +167,26 @@ class FLOWERDDPMModel(pl.LightningModule):
 
         # Upsampling
         h_dims.reverse()
+        self.down_index.reverse()
         self.Upsampling = nn.ModuleList()
         for index in range(0, num_channels-1):
             in_channels = h_dims[index]
             out_channels = h_dims[index+1]
             # Upsample
-            self.Upsampling.append(UpBlock(in_features=in_channels, out_features=in_channels, act=self.act, with_conv=self.with_conv))
+            if self.down_index[index]==1:
+                self.Upsampling.append(UpBlock(in_features=in_channels, out_features=in_channels, act=self.act, with_conv=self.with_conv))
+                f_res *= 2
             self.Upsampling.append(
                 ResNetBlock(in_features=in_channels, out_features=out_channels, act=self.act, time_features=self.time_features)
             )
             if f_res in self.attn_resolutions:
                 self.Upsampling.append(AttnBlock(features=out_channels))
-            f_res *= 2
-                # End
+        # End
         self.End = nn.ModuleList()
-        self.End.append(nn.Sequential(
-            nn.GroupNorm(num_groups=out_channels, num_channels=out_channels),
-            self.act,
-            nn.Conv2d(out_channels, out_channels, kernel_size=(3, 3), stride=1, padding=1),
-        ))
+        self.End.append(
+            nn.Sequential(
+                Custumnn.Linear(out_channels, out_channels),
+            ))
     
     def forward(self, x : Tensor, t= None) -> Tensor:
         if t == None:
@@ -194,19 +198,25 @@ class FLOWERDDPMModel(pl.LightningModule):
         temb = self.linear_1(temb)
         temb = self.linear_2(self.act(temb))
 
+        skip = []
         # Downsampling
         for module in self.Downsampling:
             h = module(h, temb)
+            skip.append(h)
         # Middle
         for module in self.Middle:
             h = module(h, temb)
         # Upsampling
-        for module in self.Upsampling:
+        skip.reverse()
+        for index, module in enumerate(self.Upsampling):
+            if index < len(skip):
+                h += skip[index]
             h = module(h, temb)
+        # for module in self.Upsampling:
+        #     h = module(h, temb)
         # End
         for module in self.End:
             h = module(h)
-
         return h
     # Cosine scheduler
     def diffusion_schedule(self, diffusion_times: int) -> List[Tensor]:
@@ -235,7 +245,7 @@ class FLOWERDDPMModel(pl.LightningModule):
         noise_rates, signal_rates = self.diffusion_schedule(diffusion_times) # \sqrt{alpha_bar}, \sqrt{alpha_bar}
         noisy_images = signal_rates * images + noise_rates * noises
         pred_noises, pred_images = self.denoise(noisy_images, noise_rates, signal_rates)
-        loss = F.mse_loss(pred_noises, noises)
+        loss = F.l1_loss(pred_noises, noises)
         return loss
 
     def reverse_diffusion(self, initial_noise, diffusion_steps):
@@ -244,7 +254,6 @@ class FLOWERDDPMModel(pl.LightningModule):
         current_images = initial_noise
         for step in range(diffusion_steps):
             diffusion_times = torch.ones((num_images, 1, 1, 1), device=self.curr_device) - step * step_size
-            diffusion_times.to(self.curr_device)
             noise_rates, signal_rates = self.diffusion_schedule(diffusion_times)
             pred_noises, pred_images = self.denoise(
                 current_images, noise_rates, signal_rates
@@ -280,17 +289,17 @@ class FLOWERDDPMModel(pl.LightningModule):
         x_0, y = batch
         self.curr_device = x_0.device
         loss = self.p_loss(x_0)
-        self.log('Val Loss', loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log('VL', loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
 
     def test_step(self, batch, batch_idx):
         x_0, y = batch
         self.curr_device = x_0.device
         loss = self.p_loss(x_0)
-        self.log('Test Loss', loss, on_step=False, on_epoch=True, sync_dist=True)
+        self.log('TeL', loss, on_step=False, on_epoch=True, sync_dist=True)
 
     def configure_optimizers(self):
         optimizer = \
-        torch.optim.Adam(
+        torch.optim.AdamW(
             self.parameters(),
             lr=self.config['learning_rate'],
             weight_decay=self.config['weight_decay']

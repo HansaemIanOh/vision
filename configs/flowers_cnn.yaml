@@ -1,5 +1,5 @@
 model_config:
-  name: 'flowers_cnn'
+  name: 'cnn'
   input_channels: 3
   learning_rate: 0.001
   manual_seed: 42
@@ -22,7 +22,7 @@ data_config:
 
 trainer_config:
   accelerator: 'gpu'
-  devices: 4  # 2 or [0, 1]
+  devices: 2  # 2 or [0, 1]
   max_epochs: 100
 
 log_config:

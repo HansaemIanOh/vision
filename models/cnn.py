@@ -9,7 +9,7 @@ import pytorch_lightning as pl
 from torchmetrics import Accuracy
 import torchvision.utils as vutils
 
-class FLOWERCNNModel(pl.LightningModule):
+class CNNModel(pl.LightningModule):
     def __init__(self, config, **kwargs):
         super().__init__()
         self.config = config
@@ -88,8 +88,8 @@ class FLOWERCNNModel(pl.LightningModule):
         loss = F.nll_loss(logits, y)
         preds = torch.argmax(logits, dim=1)
         acc = self.val_accuracy(preds, y)
-        self.log('Val Loss', loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
-        self.log('Val Acc', acc, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log('VL', loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log('VA', acc, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
 
         self.val_losses.append(loss.item())
 
@@ -104,8 +104,8 @@ class FLOWERCNNModel(pl.LightningModule):
         loss = F.nll_loss(logits, y)
         preds = torch.argmax(logits, dim=1)
         acc = self.val_accuracy(preds, y)
-        self.log('Test Loss', loss, on_step=False, on_epoch=True, sync_dist=True)
-        self.log('Test Acc', acc, on_step=False, on_epoch=True, sync_dist=True)
+        self.log('TeL', loss, on_step=False, on_epoch=True, sync_dist=True)
+        self.log('TeA', acc, on_step=False, on_epoch=True, sync_dist=True)
 
     def configure_optimizers(self):
         optimizer = \

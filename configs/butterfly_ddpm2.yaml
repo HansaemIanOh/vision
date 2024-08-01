@@ -8,16 +8,16 @@ model_config:
   attn_res: [14]
   with_conv: True
   dropout: 0.1
-  latent_dim: [3, 224, 224]
-  sampling_period: 20
-  weight_decay: 0.001
-  diffusion_steps: 20
+  latent_dim: [3, 64, 64]
+  sampling_period: 1
+  weight_decay: 0.0001
+  diffusion_steps: 50
   scheduler_gamma: 0.99
-  patch_size: 224 # =*=*=*=*=*=*=*=*=*=*
+  patch_size: 64 # =*=*=*=*=*=*=*=*=*=*
 
 data_config:
-  patch_size: 224 # =*=*=*=*=*=*=*=*=*=*
-  data_dir: "data/flowers/train"
+  patch_size: 64 # =*=*=*=*=*=*=*=*=*=*
+  data_dir: "data/butterfly"
   batch_size: 16
   num_workers: 4
   use_manual_split: True
@@ -29,7 +29,7 @@ trainer_config:
   max_epochs: 2000
 
 log_config:
-  name: "flower_ddpm"
+  name: "butterfly_ddpm"
   save_dir: "logs/"
   check_dir: "logs/check"
   checkpoint_path: None
