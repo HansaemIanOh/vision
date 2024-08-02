@@ -130,7 +130,19 @@ class VAEModel(pl.LightningModule):
         self.log('TeL', loss, on_step=False, on_epoch=True, sync_dist=True)
 
     def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=self.config['learning_rate'])
+        optimizer = \
+        torch.optim.AdamW(
+            self.parameters(),
+            lr=self.config['learning_rate'],
+            weight_decay=self.config['weight_decay']
+            )
+
+        try:
+            if self.config['scheduler_gamma'] is not None:
+                scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer = optimizer, gamma = self.config['scheduler_gamma'])
+                return [optimizer], [scheduler]
+        except:
+            return optimizer
     
     def on_validation_epoch_end(self):
         if self.current_epoch % self.sampling_period == 0:

@@ -12,144 +12,228 @@ import torchvision.utils as vutils
 from . import Custumnn
 from safetensors.torch import save_file, load_file
 
-class GANmodel:
-    pass
+class GENERATOR(pl.LightningModule):
+    def __init__(self, config):
+        super().__init__()
+        self.h_dims = config['h_dim:generator']
+        self.num_channels = len(self.h_dims)
 
-# img_shape = (opt.channels, opt.img_size, opt.img_size)
+        f_res = 1
+        # generator
+        self.generator = nn.ModuleList()
+        for index in range(0, self.num_channels-1):
+            in_channels = self.h_dims[index]
+            out_channels = self.h_dims[index+1]
 
-# cuda = True if torch.cuda.is_available() else False
+            self.generator.append(
+            nn.Sequential(
+                nn.Upsample(scale_factor=2, mode='nearest'),
+                nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=3, stride=1, padding=1),
+                nn.BatchNorm2d(out_channels),
+                nn.ReLU(),
+            ))
+            f_res *= 2
+        # Final
+        self.generator.append(
+            nn.Sequential(
+                Custumnn.Linear(out_channels, out_channels),
+            ))
+    def forward(self, x):
+        '''
+        noise : [B, C, 1, 1]
+        '''
+        h = x
+        for module in self.generator:
+            h = module(h)
+        return h
 
+class DISCRIMINATOR(pl.LightningModule):
+    def __init__(self, config):
+        super().__init__()
+        self.h_dims = config['h_dim:discriminator']
+        self.patch_size = config['patch_size']
+        self.num_channels = len(self.h_dims)
 
-# class Generator(nn.Module):
-#     def __init__(self):
-#         super(Generator, self).__init__()
+        
+        f_res = self.patch_size
+        # discriminator
+        self.discriminator = nn.ModuleList()
+        for index in range(0, self.num_channels-1):
+            in_channels = self.h_dims[index]
+            out_channels = self.h_dims[index+1]
 
-#         def block(in_feat, out_feat, normalize=True):
-#             layers = [nn.Linear(in_feat, out_feat)]
-#             if normalize:
-#                 layers.append(nn.BatchNorm1d(out_feat, 0.8))
-#             layers.append(nn.LeakyReLU(0.2, inplace=True))
-#             return layers
+            self.discriminator.append(
+            nn.Sequential(
+                nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=3, stride=2, padding=1),
+                nn.BatchNorm2d(out_channels),
+                nn.ReLU(),
+            ))
+            f_res /= 2
+        assert int(f_res) == f_res, f"f_res must be an integer, but got {f_res}"
+        # Final
+        self.final = \
+            nn.Sequential(
+                Custumnn.Linear(out_channels*int(f_res)**2, 1),
+            )
 
-#         self.model = nn.Sequential(
-#             *block(opt.latent_dim, 128, normalize=False),
-#             *block(128, 256),
-#             *block(256, 512),
-#             *block(512, 1024),
-#             nn.Linear(1024, int(np.prod(img_shape))),
-#             nn.Tanh()
-#         )
+    def forward(self, x):
+        '''
+        image : [B, 3, patch_size, patch_size]
+        '''
+        h = x
+        for module in self.discriminator:
+            h = module(h)
+        h = torch.flatten(h, 1)
+        h = self.final(h)
+        return h
 
-#     def forward(self, z):
-#         img = self.model(z)
-#         img = img.view(img.size(0), *img_shape)
-#         return img
+class GANmodel(pl.LightningModule):
+    def __init__(self, config, **kwargs):
+        super().__init__()
+        self.automatic_optimization = False
+        self.config = config
+        self.generator = GENERATOR(config)
+        self.discriminator = DISCRIMINATOR(config)
+        self.k = config['k']
+        self.latent_dim = config['h_dim:generator'][0]
+        self.sampling_period = config['sampling_period']
+        self.grid = config['grid']
 
+    def loss_function(self, x, idx):
+        # generator loss
+        if idx==0:
+            z = torch.randn((x.shape[0], self.latent_dim, 1, 1), device=x.device)
+            x_fake = self.generator(z)
+            ones = torch.ones((x.shape[0], 1), device=x.device)
+            loss = F.binary_cross_entropy_with_logits(self.discriminator(x_fake), ones)
+            return loss
+        # discriminator loss
+        if idx == 1:
+            z = torch.randn((x.shape[0], self.latent_dim, 1, 1), device=x.device)
+            x_fake = self.generator(z)
+            
+            # Real images should be classified as real (1)
+            real_loss = F.binary_cross_entropy_with_logits(
+                self.discriminator(x), 
+                torch.ones((x.shape[0], 1), device=x.device)
+            )
+            
+            # Fake images should be classified as fake (0)
+            fake_loss = F.binary_cross_entropy_with_logits(
+                self.discriminator(x_fake.detach()),  # detach to avoid training generator
+                torch.zeros((x.shape[0], 1), device=x.device)
+            )
+            
+            # Total discriminator loss is the average of real and fake losses
+            loss = (real_loss + fake_loss) / 2
+            return loss
 
-# class Discriminator(nn.Module):
-#     def __init__(self):
-#         super(Discriminator, self).__init__()
+        raise ValueError("Invalid idx value. Must be 0 for generator or 1 for discriminator.")
 
-#         self.model = nn.Sequential(
-#             nn.Linear(int(np.prod(img_shape)), 512),
-#             nn.LeakyReLU(0.2, inplace=True),
-#             nn.Linear(512, 256),
-#             nn.LeakyReLU(0.2, inplace=True),
-#             nn.Linear(256, 1),
-#             nn.Sigmoid(),
-#         )
+    def training_step(self, batch, batch_idx):
+        x, _ = batch
+        self.curr_device = x.device
 
-#     def forward(self, img):
-#         img_flat = img.view(img.size(0), -1)
-#         validity = self.model(img_flat)
+        opt_g, opt_d = self.optimizers()
+        # Discriminator Training
+        for _ in range(self.k):
+            opt_d.zero_grad()
+            d_loss = self.loss_function(x, idx=1)
+            self.manual_backward(d_loss)
+            opt_d.step()
+            self.log('T:D_loss', d_loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
 
-#         return validity
+        # Generator Training
+        opt_g.zero_grad()
+        g_loss = self.loss_function(x, idx=0)
+        self.manual_backward(g_loss)
+        opt_g.step()
+        self.log('T:G_loss', g_loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
 
+        return {"g_loss": g_loss, "d_loss": d_loss}
 
-# # Loss function
-# adversarial_loss = torch.nn.BCELoss()
+    def validation_step(self, batch, batch_idx):
+        x, _ = batch
+        self.curr_device = x.device
 
-# # Initialize generator and discriminator
-# generator = Generator()
-# discriminator = Discriminator()
+        with torch.no_grad():
+            # Discriminator Evaluation
+            for _ in range(self.k):
+                d_loss = self.loss_function(x, idx=1)
+                self.log('V:D_loss', d_loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
 
-# if cuda:
-#     generator.cuda()
-#     discriminator.cuda()
-#     adversarial_loss.cuda()
+            # Generator Evaluation
+            g_loss = self.loss_function(x, idx=0)
+            self.log('V:G_loss', g_loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
 
-# # Configure data loader
-# os.makedirs("../../data/mnist", exist_ok=True)
-# dataloader = torch.utils.data.DataLoader(
-#     datasets.MNIST(
-#         "../../data/mnist",
-#         train=True,
-#         download=True,
-#         transform=transforms.Compose(
-#             [transforms.Resize(opt.img_size), transforms.ToTensor(), transforms.Normalize([0.5], [0.5])]
-#         ),
-#     ),
-#     batch_size=opt.batch_size,
-#     shuffle=True,
-# )
+    def test_step(self, batch, batch_idx):
+        x, _ = batch
+        self.curr_device = x.device
 
-# # Optimizers
-# optimizer_G = torch.optim.Adam(generator.parameters(), lr=opt.lr, betas=(opt.b1, opt.b2))
-# optimizer_D = torch.optim.Adam(discriminator.parameters(), lr=opt.lr, betas=(opt.b1, opt.b2))
+        with torch.no_grad():
+            # Discriminator Evaluation
+            for _ in range(self.k):
+                d_loss = self.loss_function(x, idx=1)
+                self.log('Te:D_loss', d_loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
 
-# Tensor = torch.cuda.FloatTensor if cuda else torch.FloatTensor
+            # Generator Evaluation
+            g_loss = self.loss_function(x, idx=0)
+            self.log('Te:G_loss', g_loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
 
-# # ----------
-# #  Training
-# # ----------
+    def configure_optimizers(self):
+        opt_g = torch.optim.AdamW(
+            self.generator.parameters(),
+            lr=self.config['learning_rate'],
+            weight_decay=self.config['weight_decay']
+        )
+        opt_d = torch.optim.AdamW(
+            self.discriminator.parameters(),
+            lr=self.config['learning_rate'],
+            weight_decay=self.config['weight_decay']
+        )
 
-# for epoch in range(opt.n_epochs):
-#     for i, (imgs, _) in enumerate(dataloader):
+        optimizers = [opt_g, opt_d]
 
-#         # Adversarial ground truths
-#         valid = Variable(Tensor(imgs.size(0), 1).fill_(1.0), requires_grad=False)
-#         fake = Variable(Tensor(imgs.size(0), 1).fill_(0.0), requires_grad=False)
+        try:
+            if self.config['scheduler_gamma'] is not None:
+                scheduler_g = torch.optim.lr_scheduler.ExponentialLR(optimizer=opt_g, gamma=self.config['scheduler_gamma'])
+                scheduler_d = torch.optim.lr_scheduler.ExponentialLR(optimizer=opt_d, gamma=self.config['scheduler_gamma'])
+                schedulers = [scheduler_g, scheduler_d]
+                return optimizers, schedulers
+        except KeyError:
+            return optimizers
+    
+    def on_validation_epoch_end(self):
+        if self.current_epoch % self.sampling_period == 0:
+            self.sample_images()
+    
+    def sample(self, num_samples):
+        
+        z = torch.randn((num_samples, self.latent_dim, 1, 1), device=self.device)
 
-#         # Configure input
-#         real_imgs = Variable(imgs.type(Tensor))
+        with torch.no_grad():
+            x_fake = self.generator(z)
+        return x_fake
 
-#         # -----------------
-#         #  Train Generator
-#         # -----------------
+    def sample_images(self):
 
-#         optimizer_G.zero_grad()
+        try:
+            samples = self.sample(self.grid**2)
+            
+            samples_dir = os.path.join(self.logger.log_dir, "Samples")
+            os.makedirs(samples_dir, exist_ok=True)
 
-#         # Sample noise as generator input
-#         z = Variable(Tensor(np.random.normal(0, 1, (imgs.shape[0], opt.latent_dim))))
+            vutils.save_image(samples.cpu().data,
+                              os.path.join(samples_dir,
+                                           f"{self.logger.name}_Epoch_{self.current_epoch}.png"),
+                              normalize=True,
+                              nrow=self.grid)
+        except Warning:
+            pass
 
-#         # Generate a batch of images
-#         gen_imgs = generator(z)
-
-#         # Loss measures generator's ability to fool the discriminator
-#         g_loss = adversarial_loss(discriminator(gen_imgs), valid)
-
-#         g_loss.backward()
-#         optimizer_G.step()
-
-#         # ---------------------
-#         #  Train Discriminator
-#         # ---------------------
-
-#         optimizer_D.zero_grad()
-
-#         # Measure discriminator's ability to classify real from generated samples
-#         real_loss = adversarial_loss(discriminator(real_imgs), valid)
-#         fake_loss = adversarial_loss(discriminator(gen_imgs.detach()), fake)
-#         d_loss = (real_loss + fake_loss) / 2
-
-#         d_loss.backward()
-#         optimizer_D.step()
-
-#         print(
-#             "[Epoch %d/%d] [Batch %d/%d] [D loss: %f] [G loss: %f]"
-#             % (epoch, opt.n_epochs, i, len(dataloader), d_loss.item(), g_loss.item())
-#         )
-
-#         batches_done = epoch * len(dataloader) + i
-#         if batches_done % opt.sample_interval == 0:
-#             save_image(gen_imgs.data[:25], "images/%d.png" % batches_done, nrow=5, normalize=True)
+    @classmethod
+    def load_from_checkpoint(cls, checkpoint_path, config, *args, **kwargs):
+        model = cls(config, *args, **kwargs)
+        state_dict = load_file(checkpoint_path)
+        model.load_state_dict(state_dict, strict=False)
+        return model
