@@ -9,7 +9,7 @@ model_config:
   with_conv: True
   dropout: 0.1
   latent_dim: [3, 224, 224]
-  sampling_period: 20
+  sampling_period: 1
   weight_decay: 0.001
   diffusion_steps: 20
   scheduler_gamma: 0.99
@@ -28,11 +28,11 @@ trainer_config:
   accelerator: 'gpu'
   devices: 1  # 2 or [0, 1]
   max_epochs: 2000
-
+  precision: 16-mixed
 log_config:
   name: "flower_ddpm"
   save_dir: "logs/"
   check_dir: "logs/check"
-  checkpoint_path: None
+  checkpoint: True
   model_summary: False
   

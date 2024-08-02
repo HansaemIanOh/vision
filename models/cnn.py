@@ -54,7 +54,6 @@ class CNNModel(pl.LightningModule):
 
         self.train_losses = []
         self.val_losses = []
-        self.test_losses = []
     def forward(self, x):
         h = x
         for module in self.Downsampling:

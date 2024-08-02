@@ -1,4 +1,5 @@
 import os
+import shutil
 from safetensors.torch import save_file
 from pytorch_lightning.callbacks import Callback
 import torch
@@ -6,6 +7,7 @@ import torch
 class SafetensorsCheckpoint(Callback):
     def __init__(
         self,
+        config_path: str,
         dirpath: str,
         filename: str = "{epoch}-{step}-{val_loss:.2f}",
         monitor: str = "val_loss",
@@ -15,6 +17,7 @@ class SafetensorsCheckpoint(Callback):
         every_n_epochs: int = 1,
     ):
         super().__init__()
+        self.config_path = config_path
         self.dirpath = dirpath
         self.filename = filename
         self.monitor = monitor
@@ -86,3 +89,7 @@ class SafetensorsCheckpoint(Callback):
             last_filepath = os.path.join(self.dirpath, "last.safetensors")
             self._save_checkpoint(trainer, last_filepath)
             self.last_model_path = last_filepath
+
+    def on_train_start(self, trainer, pl_module):
+            os.makedirs(self.dirpath, exist_ok=True)
+            shutil.copy(self.config_path, os.path.join(self.dirpath, '../config.yaml'))

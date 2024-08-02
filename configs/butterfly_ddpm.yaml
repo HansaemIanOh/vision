@@ -28,7 +28,7 @@ trainer_config:
   accelerator: 'gpu'
   devices: 1  # 2 or [0, 1]
   max_epochs: 2000
-
+  precision: 16-mixed
 log_config:
   name: "butterfly_ddpm"
   save_dir: "logs/"

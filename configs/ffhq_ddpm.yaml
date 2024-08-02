@@ -31,6 +31,6 @@ log_config:
   name: "ffhq_ddpm"
   save_dir: "logs/"
   check_dir: "logs/check"
-  checkpoint_path: "logs/ffhq_ddpm/checkpoint/ffhq_ddpm_VL=0.04360.ckpt"
+  checkpoint: True
   model_summary: False
   

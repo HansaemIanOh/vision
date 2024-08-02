@@ -8,6 +8,7 @@ import pytorch_lightning as pl
 from torchmetrics import Accuracy
 import torchvision.utils as vutils
 from . import Custumnn
+from safetensors.torch import save_file, load_file
 
 class VQBlock(nn.Module):
 
@@ -85,10 +86,10 @@ class VQVAEModel(pl.LightningModule):
         # Upsample
         self.Upsampling = nn.ModuleList()
 
-        self.h_dims.reverse()
+        self.reversed_h_dims = self.h_dims[::-1]
         for index in range(0, num_channels-1):
-            in_channels = self.h_dims[index]
-            out_channels = self.h_dims[index+1]
+            in_channels = self.reversed_h_dims[index]
+            out_channels = self.reversed_h_dims[index+1]
 
             self.Upsampling.append(
             nn.Sequential(
@@ -208,3 +209,10 @@ class VQVAEModel(pl.LightningModule):
         #                       nrow=4)
         # except Warning:
         #     pass
+
+    @classmethod
+    def load_from_checkpoint(cls, checkpoint_path, config, *args, **kwargs):
+        model = cls(config, *args, **kwargs)
+        state_dict = load_file(checkpoint_path)
+        model.load_state_dict(state_dict, strict=False)
+        return model

@@ -1,5 +1,6 @@
 import os
 import math
+import numpy as np
 from typing import *
 import torch
 from torch import Tensor
@@ -9,6 +10,7 @@ import pytorch_lightning as pl
 from torchmetrics import Accuracy
 import torchvision.utils as vutils
 from . import Custumnn
+from safetensors.torch import save_file, load_file
 
 def match_dims(x, y): return list(x.shape) + [1] * (len(y.shape)-len(x.shape))
 
@@ -122,33 +124,31 @@ class DDPMModel(pl.LightningModule):
     def __init__(self, config, **kwargs):
         super().__init__()
         self.config = config
-        h_dims = config['h_dims'] # [3, 16, 32, 64, 128, 256]
-        self.h_dims=h_dims
-        patch_size = config['patch_size']
-        self.patch_size = patch_size
+        self.h_dims = config['h_dims'] # [3, 16, 32, 64, 128, 256]
+        self.patch_size = config['patch_size']
         self.act = nn.LeakyReLU()
         self.attn_resolutions = config['attn_res']
         self.down_index = config['down_index']
         self.with_conv = config['with_conv']
         self.dropout = config['dropout']
-        num_channels = len(h_dims)
+        self.num_channels = len(self.h_dims)
         self.latent_dim = config['latent_dim']
         self.sampling_period = config['sampling_period']
         self.diffusion_steps = config['diffusion_steps']
         self.grid = config['grid']
-        self.ch = h_dims[1]
+        self.ch = self.h_dims[1]
         
-        self.linear_1 = Custumnn.Linear(h_dims[1], h_dims[1] * 4)
-        self.linear_2 = Custumnn.Linear(h_dims[1] * 4, h_dims[1] * 4)
-        self.time_features = h_dims[1] * 4
+        self.linear_1 = Custumnn.Linear(self.h_dims[1], self.h_dims[1] * 4)
+        self.linear_2 = Custumnn.Linear(self.h_dims[1] * 4, self.h_dims[1] * 4)
+        self.time_features = self.h_dims[1] * 4
         
         # Downsample
         self.Downsampling = nn.ModuleList()
         
-        f_res = patch_size # [224, 112, 56, 28, 14, 7]
-        for index in range(0, num_channels-1):
-            in_channels = h_dims[index]
-            out_channels = h_dims[index+1]
+        f_res = self.patch_size # [224, 112, 56, 28, 14, 7]
+        for index in range(0, self.num_channels-1):
+            in_channels = self.h_dims[index]
+            out_channels = self.h_dims[index+1]
             self.Downsampling.append(
                 ResNetBlock(in_features=in_channels, out_features=out_channels, act=self.act, time_features=self.time_features)
             )
@@ -166,14 +166,14 @@ class DDPMModel(pl.LightningModule):
         self.Middle.append(ResNetBlock(out_channels, out_channels, self.act, self.time_features, dropout=self.dropout))
 
         # Upsampling
-        h_dims.reverse()
-        self.down_index.reverse()
+        self.reversed_h_dims = self.h_dims[::-1]
+        self.reversed_down_index = self.down_index[::-1]
         self.Upsampling = nn.ModuleList()
-        for index in range(0, num_channels-1):
-            in_channels = h_dims[index]
-            out_channels = h_dims[index+1]
+        for index in range(0, self.num_channels-1):
+            in_channels = self.reversed_h_dims[index]
+            out_channels = self.reversed_h_dims[index+1]
             # Upsample
-            if self.down_index[index]==1:
+            if self.reversed_down_index[index]==1:
                 self.Upsampling.append(UpBlock(in_features=in_channels, out_features=in_channels, act=self.act, with_conv=self.with_conv))
                 f_res *= 2
             self.Upsampling.append(
@@ -187,7 +187,8 @@ class DDPMModel(pl.LightningModule):
             nn.Sequential(
                 Custumnn.Linear(out_channels, out_channels),
             ))
-    
+        self.train_losses = []
+        self.val_losses = []
     def forward(self, x : Tensor, t= None) -> Tensor:
         if t == None:
             print("Test mode. It can't be trained.")
@@ -278,18 +279,40 @@ class DDPMModel(pl.LightningModule):
     # ============================================================
     # ============================================================
 
+    def save_loss(self, phase, loss):
+        save_path = os.path.join(self.logger.log_dir, f'{phase}_losses.npy')
+        if self.trainer.is_global_zero: # Preventing duplication for multi GPU environment
+            try:
+                losses = np.load(save_path)
+                losses = np.append(losses, loss)
+            except FileNotFoundError:
+                losses = np.array([loss])
+            np.save(save_path, losses)
+
     def training_step(self, batch, batch_idx):
         x_0, y = batch
         self.curr_device = x_0.device
         loss = self.p_loss(x_0)
         self.log('TL', loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
+        
+        self.train_losses.append(loss.item())
         return loss
+
+    def on_train_epoch_end(self):
+        avg_loss = np.mean(self.train_losses)
+        self.train_losses = []
+        self.save_loss('train', avg_loss)
 
     def validation_step(self, batch, batch_idx):
         x_0, y = batch
         self.curr_device = x_0.device
         loss = self.p_loss(x_0)
         self.log('VL', loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.val_losses.append(loss.item())
+
+    def on_validation_end(self) -> None:
+        if self.current_epoch % self.sampling_period == 0:
+            self.sample_images()
 
     def test_step(self, batch, batch_idx):
         x_0, y = batch
@@ -312,15 +335,7 @@ class DDPMModel(pl.LightningModule):
         except:
             return optimizer
 
-    def on_validation_end(self) -> None:
-        if self.current_epoch % self.sampling_period == 0:
-            self.sample_images()
-
     def sample_images(self):
-        # test_input, test_label = next(iter(self.trainer.datamodule.test_dataloader()))
-        test_input, test_label = next(iter(self.trainer.datamodule.train_dataloader()))
-        test_input = test_input.to(self.curr_device)
-        test_label = test_label.to(self.curr_device)
 
         try:
             samples = self.generate(self.grid**2, self.diffusion_steps)
@@ -335,3 +350,10 @@ class DDPMModel(pl.LightningModule):
                               nrow=self.grid)
         except Warning:
             pass
+
+    @classmethod
+    def load_from_checkpoint(cls, checkpoint_path, config, *args, **kwargs):
+        model = cls(config, *args, **kwargs)
+        state_dict = load_file(checkpoint_path)
+        model.load_state_dict(state_dict, strict=False)
+        return model

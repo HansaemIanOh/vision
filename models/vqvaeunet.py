@@ -8,6 +8,8 @@ import pytorch_lightning as pl
 from torchmetrics import Accuracy
 import torchvision.utils as vutils
 from . import Custumnn
+from safetensors.torch import save_file, load_file
+
 def match_dims(x, y): return list(x.shape) + [1] * (len(y.shape)-len(x.shape))
 
 class DownBlock(nn.Module):
@@ -178,14 +180,14 @@ class VQVAEUNETModel(pl.LightningModule):
                 f_res /= 2
         
         # Upsampling
-        self.h_dims.reverse()
-        self.down_index.reverse()
+        self.reversed_h_dims = self.h_dims[::-1]
+        self.reversed_down_index = self.down_index[::-1]
         self.Upsampling = nn.ModuleList()
         for index in range(0, num_channels-1):
-            in_channels = self.h_dims[index]
-            out_channels = self.h_dims[index+1]
+            in_channels = self.reversed_h_dims[index]
+            out_channels = self.reversed_h_dims[index+1]
             # Upsample
-            if self.down_index[index]==1:
+            if self.reversed_down_index[index]==1:
                 self.Upsampling.append(UpBlock(in_features=in_channels, out_features=in_channels, act=self.act, with_conv=self.with_conv))
                 f_res *= 2
             self.Upsampling.append(
@@ -316,3 +318,10 @@ class VQVAEUNETModel(pl.LightningModule):
         #                       nrow=4)
         # except Warning:
         #     pass
+
+    @classmethod
+    def load_from_checkpoint(cls, checkpoint_path, config, *args, **kwargs):
+        model = cls(config, *args, **kwargs)
+        state_dict = load_file(checkpoint_path)
+        model.load_state_dict(state_dict, strict=False)
+        return model

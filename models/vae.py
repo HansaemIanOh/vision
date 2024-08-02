@@ -8,24 +8,25 @@ import pytorch_lightning as pl
 from torchmetrics import Accuracy
 import torchvision.utils as vutils
 from . import Custumnn
+from safetensors.torch import save_file, load_file
 
 class VAEModel(pl.LightningModule):
     def __init__(self, config, **kwargs):
         super().__init__()
         self.config = config
-        h_dims = config['h_dims'] # [3, 16, 32, 64, 128, 256]
-        patch_size = config['patch_size']
+        self.h_dims = config['h_dims'] # [3, 16, 32, 64, 128, 256]
+        self.patch_size = config['patch_size']
         self.latent_dim = config['latent_dim']
         self.kld_weight = config['kld_weight']
         self.sampling_period = config['sampling_period']
-        num_channels = len(h_dims)
+        num_channels = len(self.h_dims)
         # Downsample
         self.Downsampling = nn.ModuleList()
         
-        f_res = patch_size # [224, 112, 56, 28, 14, 7]
+        f_res = self.patch_size # [224, 112, 56, 28, 14, 7]
         for index in range(0, num_channels-1):
-            in_channels = h_dims[index]
-            out_channels = h_dims[index+1]
+            in_channels = self.h_dims[index]
+            out_channels = self.h_dims[index+1]
 
             self.Downsampling.append(
             nn.Sequential(
@@ -43,10 +44,10 @@ class VAEModel(pl.LightningModule):
         # Upsample
         self.Upsampling = nn.ModuleList()
 
-        h_dims.reverse()
+        reversed_h_dims = self.h_dims[::-1]
         for index in range(0, num_channels-1):
-            in_channels = h_dims[index]
-            out_channels = h_dims[index+1]
+            in_channels = reversed_h_dims[index]
+            out_channels = reversed_h_dims[index+1]
 
             self.Upsampling.append(
             nn.Sequential(
@@ -55,7 +56,7 @@ class VAEModel(pl.LightningModule):
                 nn.BatchNorm2d(out_channels),
                 nn.ReLU(),
             ))
-            patch_size *= 2
+            f_res *= 2
         # Final
         self.Upsampling.append(
             nn.Sequential(
@@ -174,3 +175,10 @@ class VAEModel(pl.LightningModule):
                               nrow=4)
         except Warning:
             pass
+
+    @classmethod
+    def load_from_checkpoint(cls, checkpoint_path, config, *args, **kwargs):
+        model = cls(config, *args, **kwargs)
+        state_dict = load_file(checkpoint_path)
+        model.load_state_dict(state_dict, strict=False)
+        return model

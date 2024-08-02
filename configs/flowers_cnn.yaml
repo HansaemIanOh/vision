@@ -23,8 +23,8 @@ data_config:
 trainer_config:
   accelerator: 'gpu'
   devices: 2  # 2 or [0, 1]
-  max_epochs: 100
-
+  max_epochs: 10
+  precision: 16-mixed
 log_config:
   name: "flowers_cnn"
   save_dir: "logs/"

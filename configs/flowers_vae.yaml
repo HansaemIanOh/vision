@@ -1,13 +1,13 @@
 model_config:
   name: 'vae'
   input_channels: 3
-  learning_rate: 0.0001
+  learning_rate: 0.001
   manual_seed: 42
   h_dims: [3, 16, 32, 64, 128, 256] # 224, 112, 56, 28, 14, 7
   patch_size: 224
   latent_dim: 1024
-  kld_weight: 0.0002
-  sampling_period: 10
+  kld_weight: 0.00025
+  sampling_period: 1
 
 data_config:
   data_dir: "data/flowers/train"
@@ -20,12 +20,12 @@ data_config:
 trainer_config:
   accelerator: 'gpu'
   devices: 2  # 2 or [0, 1]
-  max_epochs: 500
-
+  max_epochs: 50
+  precision: 16-mixed
 log_config:
   name: "flower_vae"
   save_dir: "logs/"
   check_dir: "logs/check"
-  checkpoint_path: None
-  model_summary: True
+  checkpoint: True
+  model_summary: False
   

@@ -12,6 +12,8 @@ from models import get_model
 from torchinfo import summary
 from safetensors.torch import save_file, load_file
 from utils import SafetensorsCheckpoint
+import shutil
+
 torch.set_float32_matmul_precision('high')
 
 parser = argparse.ArgumentParser()
@@ -60,6 +62,7 @@ if config['log_config']['model_summary']:
 
 # Checkpoint callback
 safetensors_callback = SafetensorsCheckpoint(
+    config_path=args.filename,
     dirpath=os.path.join(logger.log_dir, "checkpoints"),
     monitor='VL',
     mode='min',
