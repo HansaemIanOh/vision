@@ -1,0 +1,36 @@
+model_config:
+  name: 'ddpm'
+  input_channels: 3
+  learning_rate: 0.0001
+  manual_seed: 42
+  h_dims:     [3, 64, 64, 128, 128, 256, 256] # 1024, 512, 256, 128, 64, 32, 16
+  down_index: [0,  1,  1,   1,   1,   1,   1]
+  attn_res: [16, 32]
+  with_conv: True
+  dropout: 0.1
+  latent_dim: [3, 1024, 1024]
+  sampling_period: 20
+  weight_decay: 0.0001
+  diffusion_steps: 50
+  scheduler_gamma: 0.99
+  patch_size: 1024 # =*=*=*=*=*=*=*=*=*=*
+  grid: 1
+data_config:
+  patch_size: 1024 # =*=*=*=*=*=*=*=*=*=*
+  data_dir: "data/ffhq"
+  batch_size: 4
+  num_workers: 4
+  use_manual_split: True
+
+trainer_config:
+  accelerator: 'gpu'
+  devices: 2  # 2 or [0, 1]
+  max_epochs: 100
+  precision: 16-mixed
+log_config:
+  name: "ffhq_ddpm"
+  save_dir: "logs/"
+  check_dir: "logs/check"
+  checkpoint_path: "logs/ffhq_ddpm/checkpoint/ffhq_ddpm_VL=0.04360.ckpt"
+  model_summary: False
+  

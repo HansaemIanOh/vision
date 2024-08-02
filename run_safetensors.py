@@ -11,6 +11,7 @@ from dataloader import ImageFolderDataModule
 from models import get_model
 from torchinfo import summary
 from safetensors.torch import save_file, load_file
+from utils import SafetensorsCheckpoint
 torch.set_float32_matmul_precision('high')
 
 parser = argparse.ArgumentParser()
@@ -34,12 +35,20 @@ logger = TensorBoardLogger(save_dir=config['log_config']['save_dir'], name=confi
 seed_everything(config['model_config']['manual_seed'], True)
 
 model = get_model(config['model_config']['name'], config['model_config'])
+
 if config['log_config']['checkpoint']:
-    current_version = int(logger.log_dir.split('version_')[-1])
-    prev_version_dir = os.path.join(os.path.dirname(logger.log_dir), f'version_{current_version-1}')
-    last_ckpt = os.path.join(prev_version_dir, "checkpoints", "last.ckpt")
-    model = model.load_from_checkpoint(last_ckpt, config=config['model_config']) if os.path.exists(last_ckpt) else model
-    exit()
+    try:
+        current_version = int(logger.log_dir.split('version_')[-1])
+        prev_version_dir = os.path.join(os.path.dirname(logger.log_dir), f'version_{current_version-1}')
+        last_checkpoint = os.path.join(prev_version_dir, "checkpoints", "last.safetensors")
+        if os.path.exists(last_checkpoint):
+            model = model.__class__.load_from_checkpoint(last_checkpoint, config=config['model_config'])
+            print(f"Loaded checkpoint from {last_checkpoint}")
+        else:
+            print(f"No checkpoint found at {last_checkpoint}")
+    except Exception as e:
+        print(f"Error loading checkpoint: {e}")
+
 
 patch_size = config['model_config']['patch_size']
 
@@ -50,17 +59,20 @@ if config['log_config']['model_summary']:
     model_summary(model, input_size=(1, 3, patch_size, patch_size))
 
 # Checkpoint callback
-checkpoint_callback = ModelCheckpoint(
-    dirpath=os.path.join(logger.log_dir , "checkpoints"),
-    save_top_k=2,
+safetensors_callback = SafetensorsCheckpoint(
+    dirpath=os.path.join(logger.log_dir, "checkpoints"),
     monitor='VL',
-    save_last= True
+    mode='min',
+    save_top_k=2,
+    save_last=True,
+    filename='epoch={epoch}-VL={VL:.2f}'
 )
 
 trainer = pl.Trainer(
+    enable_checkpointing=False,
     logger=logger,
     callbacks=[LearningRateMonitor(),
-               checkpoint_callback],
+               safetensors_callback],
     log_every_n_steps=1,
     enable_progress_bar=True,
     **config['trainer_config']

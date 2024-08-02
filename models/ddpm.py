@@ -75,7 +75,6 @@ class ResNetBlock(nn.Module):
             h = module(h)
         
         temb = self.linear_temb(self.act(temb))
-        # h+= temb.view(match_dims(temb, h))
         h+= temb
 
         for module in self.block2:
@@ -136,6 +135,7 @@ class DDPMModel(pl.LightningModule):
         self.latent_dim = config['latent_dim']
         self.sampling_period = config['sampling_period']
         self.diffusion_steps = config['diffusion_steps']
+        self.grid = config['grid']
         self.ch = h_dims[1]
         
         self.linear_1 = Custumnn.Linear(h_dims[1], h_dims[1] * 4)
@@ -323,7 +323,7 @@ class DDPMModel(pl.LightningModule):
         test_label = test_label.to(self.curr_device)
 
         try:
-            samples = self.generate(16, self.diffusion_steps)
+            samples = self.generate(self.grid**2, self.diffusion_steps)
             
             samples_dir = os.path.join(self.logger.log_dir, "Samples")
             os.makedirs(samples_dir, exist_ok=True)
@@ -332,6 +332,6 @@ class DDPMModel(pl.LightningModule):
                               os.path.join(samples_dir,
                                            f"{self.logger.name}_Epoch_{self.current_epoch}.png"),
                               normalize=True,
-                              nrow=4)
+                              nrow=self.grid)
         except Warning:
             pass

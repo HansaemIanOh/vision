@@ -14,6 +14,7 @@ model_config:
   diffusion_steps: 50
   scheduler_gamma: 0.99
   patch_size: 224 # =*=*=*=*=*=*=*=*=*=*
+  grid: 2
 
 data_config:
   patch_size: 224 # =*=*=*=*=*=*=*=*=*=*
@@ -25,13 +26,13 @@ data_config:
 
 trainer_config:
   accelerator: 'gpu'
-  devices: 2  # 2 or [0, 1]
+  devices: 1  # 2 or [0, 1]
   max_epochs: 2000
 
 log_config:
   name: "butterfly_ddpm"
   save_dir: "logs/"
   check_dir: "logs/check"
-  checkpoint_path: None
+  checkpoint: False
   model_summary: False
   

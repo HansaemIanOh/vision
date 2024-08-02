@@ -8,6 +8,7 @@ import torch.nn.functional as F
 import pytorch_lightning as pl
 from torchmetrics import Accuracy
 import torchvision.utils as vutils
+from safetensors.torch import save_file, load_file
 
 class CNNModel(pl.LightningModule):
     def __init__(self, config, **kwargs):
@@ -132,3 +133,9 @@ class CNNModel(pl.LightningModule):
                 losses = np.array([loss])
             np.save(save_path, losses)
 
+    @classmethod
+    def load_from_checkpoint(cls, checkpoint_path, config, *args, **kwargs):
+        model = cls(config, *args, **kwargs)
+        state_dict = load_file(checkpoint_path)
+        model.load_state_dict(state_dict, strict=False)
+        return model

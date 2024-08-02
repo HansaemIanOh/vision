@@ -14,7 +14,8 @@ model_config:
   diffusion_steps: 20
   scheduler_gamma: 0.99
   patch_size: 224 # =*=*=*=*=*=*=*=*=*=*
-
+  grid: 2
+  
 data_config:
   patch_size: 224 # =*=*=*=*=*=*=*=*=*=*
   data_dir: "data/flowers/train"
