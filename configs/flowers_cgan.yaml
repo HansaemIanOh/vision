@@ -1,0 +1,43 @@
+model_config:
+  name: 'cgan'
+  input_channels: 3
+  learning_rate:g: 0.001
+  learning_rate:d: 0.001
+  manual_seed: 42
+  generator:st_res: 4
+  h_dim:generator:    [512, 256, 128, 64, 32, 3]
+  generator:up_index: [0, 1, 1, 1, 1, 1] # 4, 8, 16, 32, 64, 128
+  h_dim:discriminator: [3, 64, 128, 128, 256, 512] # 128, 64, 32, 16, 8
+  generator:down_index: [0, 1, 1, 1, 1, 1] 
+  patch_size: 128
+  k_d: 2
+  k_g: 1
+  sampling_period: 2
+  grid: 4
+  num_classes: 5
+  weight_decay: 0.01
+  scheduler_gamma: 0.95
+  EMA: None
+  SWA: None
+
+data_config:
+  data_dir: "data/flowers/train"
+  batch_size: 16
+  patch_size: 128
+  num_workers: 4
+  use_manual_split: True
+
+
+trainer_config:
+  accelerator: 'gpu'
+  devices: 1  # 2 or [0, 1]
+  max_epochs: 1000
+  precision: 16-mixed
+
+log_config:
+  name: "flowers_cgan"
+  save_dir: "logs/"
+  check_dir: "logs/check"
+  checkpoint: True
+  model_summary: False
+  
