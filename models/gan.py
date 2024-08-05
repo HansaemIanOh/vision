@@ -94,7 +94,9 @@ class GANmodel(pl.LightningModule):
         self.config = config
         self.generator = GENERATOR(config)
         self.discriminator = DISCRIMINATOR(config)
-        self.k = config['k']
+        self.k_d = config['k_d']
+        self.k_g = config['k_g']
+        self.st_res = config['generator:st_res']
         self.latent_dim = config['h_dim:generator'][0]
         self.sampling_period = config['sampling_period']
         self.grid = config['grid']
@@ -102,14 +104,14 @@ class GANmodel(pl.LightningModule):
     def loss_function(self, x, idx):
         # generator loss
         if idx==0:
-            z = torch.randn((x.shape[0], self.latent_dim, 1, 1), device=x.device)
+            z = torch.randn((x.shape[0], self.latent_dim, self.st_res, self.st_res), device=x.device)
             x_fake = self.generator(z)
             ones = torch.ones((x.shape[0], 1), device=x.device)
             loss = F.binary_cross_entropy_with_logits(self.discriminator(x_fake), ones)
             return loss
         # discriminator loss
         if idx == 1:
-            z = torch.randn((x.shape[0], self.latent_dim, 1, 1), device=x.device)
+            z = torch.randn((x.shape[0], self.latent_dim, self.st_res, self.st_res), device=x.device)
             x_fake = self.generator(z)
             
             # Real images should be classified as real (1)
@@ -136,7 +138,7 @@ class GANmodel(pl.LightningModule):
 
         opt_g, opt_d = self.optimizers()
         # Discriminator Training
-        for _ in range(self.k):
+        for _ in range(self.k_d):
             opt_d.zero_grad()
             d_loss = self.loss_function(x, idx=1)
             self.manual_backward(d_loss)
@@ -144,11 +146,12 @@ class GANmodel(pl.LightningModule):
             self.log('T:D_loss', d_loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
 
         # Generator Training
-        opt_g.zero_grad()
-        g_loss = self.loss_function(x, idx=0)
-        self.manual_backward(g_loss)
-        opt_g.step()
-        self.log('T:G_loss', g_loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        for _ in range(self.k_g):
+            opt_g.zero_grad()
+            g_loss = self.loss_function(x, idx=0)
+            self.manual_backward(g_loss)
+            opt_g.step()
+            self.log('T:G_loss', g_loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
 
         return {"g_loss": g_loss, "d_loss": d_loss}
 
@@ -157,10 +160,8 @@ class GANmodel(pl.LightningModule):
         self.curr_device = x.device
 
         with torch.no_grad():
-            # Discriminator Evaluation
-            for _ in range(self.k):
-                d_loss = self.loss_function(x, idx=1)
-                self.log('V:D_loss', d_loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+            d_loss = self.loss_function(x, idx=1)
+            self.log('V:D_loss', d_loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
 
             # Generator Evaluation
             g_loss = self.loss_function(x, idx=0)
@@ -172,9 +173,8 @@ class GANmodel(pl.LightningModule):
 
         with torch.no_grad():
             # Discriminator Evaluation
-            for _ in range(self.k):
-                d_loss = self.loss_function(x, idx=1)
-                self.log('Te:D_loss', d_loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+            d_loss = self.loss_function(x, idx=1)
+            self.log('Te:D_loss', d_loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
 
             # Generator Evaluation
             g_loss = self.loss_function(x, idx=0)
@@ -183,12 +183,12 @@ class GANmodel(pl.LightningModule):
     def configure_optimizers(self):
         opt_g = torch.optim.AdamW(
             self.generator.parameters(),
-            lr=self.config['learning_rate'],
+            lr=self.config['learning_rate:g'],
             weight_decay=self.config['weight_decay']
         )
         opt_d = torch.optim.AdamW(
             self.discriminator.parameters(),
-            lr=self.config['learning_rate'],
+            lr=self.config['learning_rate:d'],
             weight_decay=self.config['weight_decay']
         )
 
@@ -209,7 +209,7 @@ class GANmodel(pl.LightningModule):
     
     def sample(self, num_samples):
         
-        z = torch.randn((num_samples, self.latent_dim, 1, 1), device=self.device)
+        z = torch.randn((num_samples, self.latent_dim, self.st_res, self.st_res), device=self.device)
 
         with torch.no_grad():
             x_fake = self.generator(z)

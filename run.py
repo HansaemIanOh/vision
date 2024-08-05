@@ -31,6 +31,13 @@ data_module = ImageFolderDataModule(**config['data_config'])
 
 data_module.setup()
 
+@rank_zero_only
+def classinfo():
+    print("Class to index mapping:", data_module.full_dataset.class_to_idx)
+    print(f"Number of classes: {data_module.num_classes}")
+
+classinfo()
+
 # TensorBoard logger
 logger = TensorBoardLogger(save_dir=config['log_config']['save_dir'], name=config['log_config']['name'])
 
@@ -80,6 +87,7 @@ trainer = pl.Trainer(
     enable_progress_bar=True,
     **config['trainer_config']
 )
+
 trainer.fit(model, datamodule=data_module)
 
 @rank_zero_only
@@ -87,4 +95,10 @@ def test_model():
     test_trainer = pl.Trainer(devices=1, num_nodes=1)
     test_trainer.test(model, data_module.test_dataloader(), verbose=True)
 
+@rank_zero_only
+def cleanup_logs():
+    if os.path.exists('lightning_logs'):
+        shutil.rmtree('lightning_logs')
+
 test_model()
+cleanup_logs()

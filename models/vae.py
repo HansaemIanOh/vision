@@ -61,7 +61,6 @@ class VAEModel(pl.LightningModule):
         self.Upsampling.append(
             nn.Sequential(
                 Custumnn.Linear(out_channels, out_channels),
-                nn.Sigmoid()
             ))
 
     def forward(self, x):
