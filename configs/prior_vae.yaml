@@ -1,0 +1,48 @@
+model_config:
+  name: 'Bvae'
+  input_channels: 3
+  learning_rate: 0.001
+  manual_seed: 42
+  h_dims: [3, 32, 64] # 28 14 7 
+  patch_size: 28
+  latent_dim: 512
+  kld_weight: 0.001
+  sampling_period: 1
+  weight_decay: 0.001
+  num_z : 32
+  prior : 'laplace'
+  cnn_config:
+    name: 'cnn'
+    input_channels: 3
+    learning_rate: 0.01
+    manual_seed: 42
+    h_dims: [3, 128, 256] # 28 14 7 
+    patch_size: 224
+    latent_dim: 512
+    kld_weight: 0.001
+    sampling_period: 1
+    weight_decay: 0.001
+    num_z : 32
+    prior : 'normal'
+    num_classes : 10
+    dropout: 0.3
+data_config:
+  data_dir: "mnist_png"
+  batch_size: 16
+  patch_size: 28
+  num_workers: 4
+  use_manual_split: False
+
+
+trainer_config:
+  accelerator: 'gpu'
+  devices: [2]  # 2 or [0, 1]
+  max_epochs: 30
+  precision: 16-mixed
+log_config:
+  name: "mnist_vae"
+  save_dir: "logs/"
+  check_dir: "logs/check"
+  checkpoint: False
+  model_summary: False
+  
