@@ -9,10 +9,7 @@ import torch.nn.functional as F
 import pytorch_lightning as pl
 from torchmetrics import Accuracy
 import torchvision.utils as vutils
-from . import Custumnn
 from safetensors.torch import save_file, load_file
-
-def match_dims(x, y): return list(x.shape) + [1] * (len(y.shape)-len(x.shape))
 
 class DownBlock(nn.Module):
     def __init__(self, in_features, out_features, act, with_conv=True):
@@ -47,7 +44,7 @@ class ResNetBlock(nn.Module):
     def __init__(self, in_features, out_features, act, time_features, conv_shortcut=False, dropout=0.):
         super().__init__()
         self.act = act
-        self.linear_temb = Custumnn.Linear(time_features, out_features)
+        self.linear_temb = nn.Conv2d(time_features, out_features, kernel_size=(1, 1), stride=1, padding=0)
         self.block1 = nn.ModuleList()
         self.block1.append(nn.Sequential(
             nn.BatchNorm2d(in_features),
@@ -68,7 +65,8 @@ class ResNetBlock(nn.Module):
             if conv_shortcut:
                 self.layers.append(nn.Conv2d(out_features, out_features, kernel_size=(3, 3), stride=1, padding=1)) # x to x
             else:
-                self.layers.append(Custumnn.Linear(in_features, out_features)) # x to x
+                self.layers.append(nn.Conv2d(in_features, out_features, kernel_size=(1, 1), stride=1, padding=0)) # x to x
+
     def forward(self, x : Tensor, temb=None) -> Tensor:
         if temb==None:
             temb = torch.randint(0, self.t_max, (x.shape[0], 64), device=x.device, dtype=x.dtype)
@@ -91,20 +89,37 @@ class ResNetBlock(nn.Module):
 class AttnBlock(nn.Module):
     def __init__(self, features):
         super().__init__()
-        self.linear1 = Custumnn.Linear(features, features)
-        self.linear2 = Custumnn.Linear(features, features)
-        self.norm = nn.BatchNorm2d(features)
+        self.features = features
+        self.norm = nn.GroupNorm(num_groups=32, num_channels=features, eps=1e-6, affine=True)
 
-    def forward(self, x : Tensor, temb : Tensor) -> Tensor:
-        
-        h = self.norm(x)
-        q = self.linear1(h).view(h.shape[0], h.shape[1], h.shape[2] * h.shape[3])
-        k = self.linear1(h).view(h.shape[0], h.shape[1], h.shape[2] * h.shape[3])
-        v = self.linear1(h).view(h.shape[0], h.shape[1], h.shape[2] * h.shape[3])
-        w = torch.matmul(q, k.transpose(-2, -1)) * (int(k.shape[1]) ** (-0.5))
+        self.q_proj = nn.Conv2d(features, features, kernel_size=(1, 1), stride=1, padding=0)
+        self.k_proj = nn.Conv2d(features, features, kernel_size=(1, 1), stride=1, padding=0)
+        self.v_proj = nn.Conv2d(features, features, kernel_size=(1, 1), stride=1, padding=0)
+        self.linear = nn.Conv2d(features, features, kernel_size=(1, 1), stride=1, padding=0)
+
+    def forward(self, x: Tensor, temb: Optional[Tensor]=None) -> Tensor:
+        '''
+        x : [B, C, H, W]
+        return : [B, C, H, W]
+        '''
+        h = x
+        # print(self.features, h.shape)
+        h = self.norm(h)
+        q = self.q_proj(h)
+        k = self.k_proj(h)
+        v = self.v_proj(h)
+        B, C, H, W = x.shape
+        # S = HW, F = C, s = S, S:For q, s:For k and v
+        q = q.view(B, C, H*W) # [B, F, S]
+        q = q.permute(0, 2, 1).contiguous() # [B, S, F]
+        k = k.view(B, C, H*W) # [B, F, s]
+        v = v.view(B, C, H*W) # [B, F, s]
+        w = torch.einsum('BSF, BFs -> BSs', q, k) * (C ** (-0.5))
         w = F.softmax(w, dim=-1)
-        h = torch.matmul(w, v).view(h.shape)
-        h = self.linear2(h)
+        w = w.permute(0, 2, 1).contiguous()
+        h = torch.einsum('BFs, BsS -> BFS', v, w)
+        h = h.view(B, C, H, W)
+        h = self.linear(h)
         return x + h
 
 def timeembed(t, embedding_dim):
@@ -138,8 +153,8 @@ class DDPMModel(pl.LightningModule):
         self.grid = config['grid']
         self.ch = self.h_dims[1]
         
-        self.linear_1 = Custumnn.Linear(self.h_dims[1], self.h_dims[1] * 4)
-        self.linear_2 = Custumnn.Linear(self.h_dims[1] * 4, self.h_dims[1] * 4)
+        self.linear_1 = nn.Conv2d(self.h_dims[1], self.h_dims[1] * 4, kernel_size=(1, 1), stride=1, padding=0)
+        self.linear_2 = nn.Conv2d(self.h_dims[1] * 4, self.h_dims[1] * 4, kernel_size=(1, 1), stride=1, padding=0)
         self.time_features = self.h_dims[1] * 4
         
         # Downsample
@@ -185,11 +200,13 @@ class DDPMModel(pl.LightningModule):
         self.End = nn.ModuleList()
         self.End.append(
             nn.Sequential(
-                Custumnn.Linear(out_channels, out_channels),
+                nn.Conv2d(out_channels, out_channels, kernel_size=(1, 1), stride=1, padding=0)
             ))
         self.train_losses = []
         self.val_losses = []
+
     def forward(self, x : Tensor, t= None) -> Tensor:
+        self.device = x.device
         if t == None:
             print("Test mode. It can't be trained.")
             t = torch.rand((x.shape[0],1, 1, 1), device=x.device) * 0
@@ -218,13 +235,15 @@ class DDPMModel(pl.LightningModule):
         # End
         for module in self.End:
             h = module(h)
+
         return h
+
     # Cosine scheduler
     def diffusion_schedule(self, diffusion_times: int) -> List[Tensor]:
         min_signal_rate = 0.02
         max_signal_rate = 0.95
-        min_signal_rate = torch.tensor(min_signal_rate, device=self.curr_device)
-        max_signal_rate = torch.tensor(max_signal_rate, device=self.curr_device)
+        min_signal_rate = torch.tensor(min_signal_rate, device=self.device)
+        max_signal_rate = torch.tensor(max_signal_rate, device=self.device)
 
         start_angle = torch.acos(max_signal_rate)
         end_angle = torch.acos(min_signal_rate)
@@ -242,7 +261,7 @@ class DDPMModel(pl.LightningModule):
 
     def p_loss(self, images):
         noises = torch.randn_like(images, dtype=images.dtype, device=images.device)
-        diffusion_times = torch.rand((images.shape[0], 1, 1, 1), device=images.device)
+        diffusion_times = torch.rand((images.shape[0], 1, 1, 1), device=images.device) # t ~ Unif(0, 1)
         noise_rates, signal_rates = self.diffusion_schedule(diffusion_times) # \sqrt{alpha_bar}, \sqrt{alpha_bar}
         noisy_images = signal_rates * images + noise_rates * noises
         pred_noises, pred_images = self.denoise(noisy_images, noise_rates, signal_rates)
@@ -254,7 +273,7 @@ class DDPMModel(pl.LightningModule):
         step_size = 1.0 / diffusion_steps
         current_images = initial_noise
         for step in range(diffusion_steps):
-            diffusion_times = torch.ones((num_images, 1, 1, 1), device=self.curr_device) - step * step_size
+            diffusion_times = torch.ones((num_images, 1, 1, 1), device=self.device) - step * step_size
             noise_rates, signal_rates = self.diffusion_schedule(diffusion_times)
             pred_noises, pred_images = self.denoise(
                 current_images, noise_rates, signal_rates
@@ -270,7 +289,7 @@ class DDPMModel(pl.LightningModule):
 
     def generate(self, num_images, diffusion_steps, initial_noise=None):
         if initial_noise is None:
-            initial_noise = torch.randn((num_images, 3, self.patch_size, self.patch_size), device=self.curr_device)
+            initial_noise = torch.randn((num_images, 3, self.patch_size, self.patch_size), device=self.device)
         generated_images = self.reverse_diffusion(
             initial_noise, diffusion_steps
         )
@@ -291,7 +310,6 @@ class DDPMModel(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         x_0, y = batch
-        self.curr_device = x_0.device
         loss = self.p_loss(x_0)
         self.log('TL', loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
         
@@ -305,7 +323,6 @@ class DDPMModel(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         x_0, y = batch
-        self.curr_device = x_0.device
         loss = self.p_loss(x_0)
         self.log('VL', loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
         self.val_losses.append(loss.item())
@@ -316,7 +333,6 @@ class DDPMModel(pl.LightningModule):
 
     def test_step(self, batch, batch_idx):
         x_0, y = batch
-        self.curr_device = x_0.device
         loss = self.p_loss(x_0)
         self.log('TeL', loss, on_step=False, on_epoch=True, sync_dist=True)
 
